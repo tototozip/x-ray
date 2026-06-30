@@ -1,4 +1,8 @@
 #!/usr/bin/env node
+import http from "node:http";
+import https from "node:https";
+import net from "node:net";
+import tls from "node:tls";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -6,281 +10,180 @@ import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const home = os.homedir();
-const xdgData = process.env.XDG_DATA_HOME || path.join(home, ".local", "share");
-const xdgState = process.env.XDG_STATE_HOME || path.join(home, ".local", "state");
+const stateDir = path.join(process.env.XDG_STATE_HOME || path.join(home, ".local", "state"), "xray");
+const certDir = path.join(stateDir, "certs");
 const self = fileURLToPath(import.meta.url);
 
-const agents = {
-  codex: {
-    label: "codex",
-    roots: [path.join(home, ".codex", "sessions")],
-    match: (row) => row?.type === "event_msg" && row?.payload?.type === "token_count",
-  },
-  claude: {
-    label: "claude",
-    roots: [path.join(home, ".claude", "projects")],
-    match: usageRow,
-  },
-  openclaw: {
-    label: "openclaw",
-    roots: [path.join(home, ".openclaw", "agents")],
-    match: usageRow,
-  },
-  pi: {
-    label: "pi",
-    roots: [path.join(home, ".pi", "agent", "sessions"), path.join(home, ".pi", "agent")],
-    match: usageRow,
-  },
-  pii: null,
-  opencode: {
-    label: "opencode",
-    db: opencodeDb(),
-  },
-};
-agents.pii = agents.pi;
+// LLM API hosts to intercept. Inference requests to these are counted; all
+// other traffic is tunneled through untouched.
+const HOSTS = ["api.openai.com", "api.anthropic.com", "chatgpt.com"];
+const AGENTS = { codex: "codex", claude: "claude" };
 
-const args = parseArgs(process.argv.slice(2));
-const agent = agents[args.agent];
-if (!agent) exit(`usage: xray [${Object.keys(agents).join("|")}] [--stdio] [--once] [--path PATH]`);
+// One inference call == one POST to a model endpoint.
+export const isCall = (method, p) =>
+  method === "POST" && /\/(responses|chat\/completions|messages)(\?|$)/.test(p);
 
-if (!args.once && !args.stdio && !args.daemon) launchWindow(args);
+if (process.argv[1] === self) main();
 
-if (args.daemon) runDaemon(agent, args);
-else runCounter(agent, args, render);
-
-function parseArgs(argv) {
-  const out = { agent: "codex", once: false, stdio: false, daemon: false, poll: 500, path: "", state: "" };
-  for (let i = 0; i < argv.length; i++) {
-    const a = argv[i];
-    if (a === "--once") out.once = true;
-    else if (a === "--stdio") out.stdio = true;
-    else if (a === "--daemon") out.daemon = true;
-    else if (a === "--path") out.path = argv[++i] || "";
-    else if (a === "--state") out.state = argv[++i] || "";
-    else if (a === "--poll") out.poll = Number(argv[++i] || out.poll);
-    else if (!a.startsWith("-")) out.agent = a;
-    else exit(`unknown option: ${a}`);
+function main() {
+  const argv = process.argv.slice(2);
+  if (!argv.length || argv[0] === "-h" || argv[0] === "--help") {
+    return exit(`usage: xray <${Object.keys(AGENTS).join("|")}|command> [args...]`, 0);
   }
-  return out;
-}
+  const name = argv[0];
+  const command = AGENTS[name] || name;
+  const certs = ensureCerts();
+  const statePath = path.join(stateDir, `${name}.json`);
+  writeState(statePath, name, 0);
 
-function launchWindow(args) {
-  if (process.platform !== "darwin") exit("window mode currently requires macOS; use --stdio for terminal mode");
-  const state = expand(args.state || path.join(xdgState, "xray", `${args.agent}.json`));
-  stopExisting();
-  fs.mkdirSync(path.dirname(state), { recursive: true });
-  writeState(state, args.agent, 0, { ready: false });
-
-  const childArgs = [self, args.agent, "--daemon", "--state", state, "--poll", String(args.poll)];
-  if (args.path) childArgs.push("--path", expand(args.path));
-
-  const child = spawn(process.execPath, childArgs, { detached: true, stdio: "ignore" });
-  child.unref();
-  waitUntilReady(state);
-  console.log("xray window opened");
-  process.exit(0);
-}
-
-function runDaemon(agent, args) {
-  const state = expand(args.state || path.join(xdgState, "xray", `${agent.label}.json`));
-  fs.mkdirSync(path.dirname(state), { recursive: true });
-  const script = path.join(path.dirname(self), "xray-window.jxa");
-  const window = spawn("osascript", ["-l", "JavaScript", script, state], { stdio: "ignore" });
-  window.on("exit", () => process.exit(0));
-  runCounter(agent, args, (label, calls) => writeState(state, label, calls, { ready: true }));
-}
-
-function runCounter(agent, args, output) {
-  if (agent.db) return watchDb(agent, args, output);
-  return watchJsonl(agent, args, output);
-}
-
-function watchJsonl(agent, args, output) {
   let calls = 0;
-  const seen = new Map();
-  const roots = args.path ? [expand(args.path)] : agent.roots;
-
-  scanJsonl(roots, seen, agent.match, { initial: true, all: args.once }, (n) => (calls += n));
-  output(agent.label, calls, true);
-  if (args.once) return;
-
-  const timer = setInterval(() => {
-    scanJsonl(roots, seen, agent.match, { initial: false, all: false }, (n) => {
-      if (n) {
-        calls += n;
-        output(agent.label, calls);
-      }
+  const proxy = startProxy(certs, () => writeState(statePath, name, ++calls));
+  proxy.listen(0, "127.0.0.1", () => {
+    const { port } = proxy.address();
+    const window = openWindow(statePath);
+    const child = spawn(command, argv.slice(1), { stdio: "inherit", env: childEnv(port, certs) });
+    child.on("error", (e) => {
+      shutdown(window, proxy);
+      exit(`failed to launch ${command}: ${e.message}`);
     });
-  }, Math.max(100, args.poll || 500));
-  process.on("SIGINT", () => {
-    clearInterval(timer);
-    if (process.stdout.isTTY) process.stdout.write("\n");
+    child.on("exit", (code) => {
+      shutdown(window, proxy);
+      process.exit(code ?? 0);
+    });
   });
 }
 
-function watchDb(agent, args, output) {
-  const db = expand(args.path || agent.db);
-  const baseline = args.once ? 0 : queryOpencode(db);
-  let calls = Math.max(0, queryOpencode(db) - baseline);
-  output(agent.label, calls, true);
-  if (args.once) return;
+function childEnv(port, certs) {
+  const url = `http://127.0.0.1:${port}`;
+  return {
+    ...process.env,
+    HTTP_PROXY: url, HTTPS_PROXY: url, ALL_PROXY: url,
+    http_proxy: url, https_proxy: url, all_proxy: url,
+    NODE_EXTRA_CA_CERTS: certs.ca, // Node adds this to its defaults
+    SSL_CERT_FILE: certs.bundle, // Rust/OpenSSL replace defaults, so use the merged bundle
+  };
+}
 
-  const timer = setInterval(() => {
-    const next = Math.max(0, queryOpencode(db) - baseline);
-    if (next !== calls) {
-      calls = next;
-      output(agent.label, calls);
-    }
-  }, Math.max(500, args.poll || 1000));
-  process.on("SIGINT", () => {
-    clearInterval(timer);
-    if (process.stdout.isTTY) process.stdout.write("\n");
+// ---- counting proxy ----
+
+function startProxy(certs, onCall) {
+  const key = fs.readFileSync(certs.leafKey);
+  const cert = fs.readFileSync(certs.leafCert);
+  const intercept = new Set(HOSTS);
+
+  const inner = http.createServer((creq, cres) => {
+    const host = (creq.headers.host || "").split(":")[0];
+    if (isCall(creq.method, creq.url)) onCall();
+    const up = https.request(
+      { host, port: 443, method: creq.method, path: creq.url, headers: creq.headers },
+      (ures) => {
+        cres.writeHead(ures.statusCode, ures.headers);
+        ures.pipe(cres);
+      },
+    );
+    up.on("error", () => cres.destroy());
+    creq.pipe(up);
   });
-}
+  // Refuse websocket upgrades so the agent falls back to the countable HTTPS path.
+  inner.on("upgrade", (_req, sock) => {
+    sock.end("HTTP/1.1 426 Upgrade Required\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
+  });
 
-function scanJsonl(roots, seen, match, opts, add) {
-  for (const file of listJsonl(roots)) {
-    const stat = safeStat(file);
-    if (!stat) continue;
-    const previous = seen.get(file);
-    const start = opts.all ? 0 : previous === undefined ? (opts.initial ? stat.size : 0) : Math.min(previous, stat.size);
-    if (start >= stat.size) {
-      seen.set(file, stat.size);
-      continue;
+  const tlsServer = tls.createServer({ key, cert, ALPNProtocols: ["http/1.1"] }, (s) =>
+    inner.emit("connection", s),
+  );
+
+  const proxy = http.createServer((_req, res) => res.writeHead(405).end());
+  proxy.on("connect", (req, client, head) => {
+    const [host, port] = req.url.split(":");
+    if (intercept.has(host)) {
+      client.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+      if (head?.length) client.unshift(head);
+      tlsServer.emit("connection", client);
+    } else {
+      const up = net.connect(Number(port) || 443, host, () => {
+        client.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+        if (head?.length) up.write(head);
+        client.pipe(up);
+        up.pipe(client);
+      });
+      up.on("error", () => client.destroy());
+      client.on("error", () => up.destroy());
     }
-    const result = countJsonl(file, start, match, opts.all);
-    seen.set(file, result.offset);
-    add(result.count);
+  });
+  return proxy;
+}
+
+// ---- window ----
+
+function openWindow(statePath) {
+  if (process.platform !== "darwin") return null;
+  const script = path.join(path.dirname(self), "xray-window.jxa");
+  return spawn("osascript", ["-l", "JavaScript", script, statePath], { stdio: "ignore" });
+}
+
+function shutdown(window, proxy) {
+  try { window?.kill(); } catch {}
+  try { proxy?.close(); } catch {}
+}
+
+// ---- certificates ----
+
+// A local CA + one leaf covering the intercepted hosts, plus a bundle that
+// merges the system roots with our CA (for TLS stacks that replace, not extend).
+export function ensureCerts() {
+  fs.mkdirSync(certDir, { recursive: true });
+  const ca = path.join(certDir, "ca-cert.pem");
+  const caKey = path.join(certDir, "ca-key.pem");
+  const leafCert = path.join(certDir, "leaf-cert.pem");
+  const leafKey = path.join(certDir, "leaf-key.pem");
+  const bundle = path.join(certDir, "bundle.pem");
+
+  if (!fs.existsSync(ca)) {
+    openssl(["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", caKey, "-out", ca,
+      "-days", "3650", "-subj", "/CN=x-ray local CA",
+      "-addext", "basicConstraints=critical,CA:TRUE",
+      "-addext", "keyUsage=critical,keyCertSign,cRLSign"]);
   }
-}
-
-function countJsonl(file, start, match, includeTrailing = false) {
-  const text = fs.readFileSync(file).subarray(start).toString("utf8");
-  const lastNewline = Math.max(text.lastIndexOf("\n"), text.lastIndexOf("\r"));
-  const completeText = includeTrailing || lastNewline === text.length - 1 ? text : text.slice(0, lastNewline + 1);
-  let count = 0;
-  for (const line of completeText.split(/\r?\n/)) {
-    if (!line.trim()) continue;
-    try {
-      if (match(JSON.parse(line))) count++;
-    } catch {}
+  if (!fs.existsSync(leafCert)) {
+    const csr = path.join(certDir, "leaf.csr");
+    const ext = path.join(certDir, "leaf.ext");
+    fs.writeFileSync(ext, `basicConstraints=CA:FALSE
+keyUsage=critical,digitalSignature,keyEncipherment
+extendedKeyUsage=serverAuth
+subjectAltName=${HOSTS.map((h) => `DNS:${h}`).join(",")}
+`);
+    openssl(["req", "-newkey", "rsa:2048", "-nodes", "-keyout", leafKey, "-out", csr, "-subj", "/CN=x-ray"]);
+    openssl(["x509", "-req", "-in", csr, "-CA", ca, "-CAkey", caKey, "-CAcreateserial",
+      "-out", leafCert, "-days", "3650", "-extfile", ext]);
   }
-  return { count, offset: start + Buffer.byteLength(completeText) };
+  if (!fs.existsSync(bundle) || mtime(ca) > mtime(bundle)) {
+    const roots = spawnSync("security", ["find-certificate", "-a", "-p",
+      "/System/Library/Keychains/SystemRootCertificates.keychain"], { encoding: "utf8" }).stdout || "";
+    fs.writeFileSync(bundle, roots + fs.readFileSync(ca, "utf8"));
+  }
+  return { ca, leafKey, leafCert, bundle };
 }
 
-function listJsonl(roots) {
-  const out = [];
-  for (const root of roots) collect(root, out);
-  return out;
+function openssl(args) {
+  const r = spawnSync("openssl", args, { encoding: "utf8" });
+  if (r.status !== 0) exit(`openssl failed: ${r.stderr || r.error?.message || "unknown"}`);
 }
 
-function collect(target, out) {
-  const stat = safeStat(target);
-  if (!stat) return;
-  if (stat.isFile() && target.endsWith(".jsonl")) return out.push(target);
-  if (!stat.isDirectory()) return;
-  for (const entry of safeReaddir(target)) collect(path.join(target, entry.name), out);
-}
+// ---- state file (read by xray-window.jxa) ----
 
-function usageRow(row) {
-  return hasUsage(row?.message) || hasUsage(row);
-}
-
-function hasUsage(message) {
-  if (message?.role !== "assistant") return false;
-  const usage = message.usage || message.tokens;
-  return usage ? usageTotal(usage) > 0 : false;
-}
-
-function usageTotal(usage) {
-  const flat = [
-    "totalTokens",
-    "total_tokens",
-    "input",
-    "output",
-    "input_tokens",
-    "output_tokens",
-    "reasoning",
-    "cache_creation_input_tokens",
-    "cache_read_input_tokens",
-  ];
-  return flat.reduce((sum, key) => sum + number(usage[key]), 0) + number(usage.cache?.read) + number(usage.cache?.write);
-}
-
-function queryOpencode(db) {
-  if (!fs.existsSync(db)) return 0;
-  const sql = "select count(*) from event where type='session.next.step.ended';";
-  const result = spawnSync("sqlite3", ["-readonly", db, sql], { encoding: "utf8" });
-  if (result.status !== 0) return 0;
-  return Number(result.stdout.trim()) || 0;
-}
-
-function opencodeDb() {
-  const env = process.env.OPENCODE_DB;
-  if (env) return path.isAbsolute(env) || env === ":memory:" ? env : path.join(xdgData, "opencode", env);
-  return path.join(xdgData, "opencode", "opencode.db");
-}
-
-function render(label, calls, first = false) {
-  const line = `${label} llm calls: ${calls}`;
-  if (!process.stdout.isTTY) return (first || calls > 0) && console.log(line);
-  process.stdout.write(`\r${line}`);
-}
-
-function writeState(file, label, calls, extra = {}) {
+function writeState(file, label, calls) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify({ label, calls, updated: Date.now(), ...extra }));
+  fs.writeFileSync(tmp, JSON.stringify({ label, calls, updated: Date.now() }));
   fs.renameSync(tmp, file);
 }
 
-function waitUntilReady(file) {
-  const deadline = Date.now() + 2000;
-  while (Date.now() < deadline) {
-    try {
-      if (JSON.parse(fs.readFileSync(file, "utf8")).ready) return;
-    } catch {}
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
-  }
+function mtime(file) {
+  try { return fs.statSync(file).mtimeMs; } catch { return 0; }
 }
 
-function stopExisting() {
-  const ps = spawnSync("ps", ["-axo", "pid=,command="], { encoding: "utf8" });
-  if (ps.status !== 0) return;
-  for (const line of ps.stdout.split("\n")) {
-    if (!line.includes("xray-window.jxa") && !(line.includes("xray.js") && line.includes("--daemon"))) continue;
-    const pid = Number(line.trim().split(/\s+/, 1)[0]);
-    if (!pid || pid === process.pid || pid === process.ppid) continue;
-    try {
-      process.kill(pid, "SIGTERM");
-    } catch {}
-  }
-}
-
-function safeStat(file) {
-  try {
-    return fs.statSync(file);
-  } catch {
-    return null;
-  }
-}
-
-function safeReaddir(dir) {
-  try {
-    return fs.readdirSync(dir, { withFileTypes: true });
-  } catch {
-    return [];
-  }
-}
-
-function expand(p) {
-  return p.startsWith("~/") ? path.join(home, p.slice(2)) : path.resolve(p);
-}
-
-function number(v) {
-  return typeof v === "number" && Number.isFinite(v) ? v : 0;
-}
-
-function exit(message) {
-  console.error(message);
-  process.exit(1);
+function exit(message, code = 1) {
+  if (message) (code ? console.error : console.log)(message);
+  process.exit(code);
 }
