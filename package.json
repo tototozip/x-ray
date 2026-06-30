@@ -1,6 +1,6 @@
 {
   "name": "@tototozip/x-ray",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Minimal, exact live LLM call counter for coding agents.",
   "type": "module",
   "bin": {

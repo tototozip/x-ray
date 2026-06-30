@@ -7,39 +7,34 @@ npm install -g github:tototozip/x-ray
 xray
 ```
 
-Run `xray`. A floating macOS window pops up, and you land in a normal shell —
-use `codex`, `claude`, or any agent as you always would. The window ticks up
-the instant any of them calls the model:
+Run `xray`. A floating macOS window pops up, and it counts **every LLM call made
+from your machine** — whether you talk to Codex in the terminal or in the app,
+or to any other agent. The window ticks up the instant a call goes out:
 
 ```txt
 llm calls: 6
 ```
 
-Close the window or `exit` the shell to stop.
+Close the window or `exit` to stop — it puts everything back the way it was.
 
-To count just one agent for a single run, name it (anything after passes
-straight through):
-
-```sh
-xray codex            # -> "codex llm calls: N"
-xray claude -p "..."
-```
-
-The catch: counting happens by routing the agent through `xray`, so the agent
-has to run **inside** the `xray` shell (or be launched as `xray <agent>`). A
-`codex` you start in some other terminal isn't counted.
+The first time, macOS asks once for your password so `xray` can trust its own
+local certificate (needed to read the count); after that it just works.
 
 ## How it counts
 
 Every model inference is one HTTPS request from your machine to the provider's
 API. `xray` counts those requests directly, at the source:
 
-- It starts a local proxy on `127.0.0.1` and launches the agent pointed at it.
+- It starts a local proxy on `127.0.0.1`, points the macOS **system proxy** at
+  it, and launches a shell wired to it — so both GUI apps and terminal agents
+  flow through `xray`.
 - For the model API hosts (`api.openai.com`, `api.anthropic.com`,
   `chatgpt.com`) it terminates TLS with a local CA it generates on first run,
   counts each `POST` to an inference endpoint (`/responses`, `/v1/messages`,
   `/chat/completions`), and forwards the request on untouched.
-- Every other host is tunneled through without interception.
+- Every other host is tunneled straight through, never decrypted.
+- On exit it restores your previous proxy setting (and does so even on Ctrl-C,
+  a closed terminal, or `kill`).
 
 Because it counts the actual request the moment it leaves, the number is exact
 and has no lag — one user prompt can increment it many times (each tool
@@ -48,12 +43,13 @@ declines it so Codex uses the countable HTTPS path.
 
 ## The trade-off
 
-To count requests, the proxy sits in the plaintext path **on your own machine**.
-It can see request contents and auth headers as they pass through; it never
-logs, stores, or transmits them, and nothing leaves `127.0.0.1`. The generated
-CA private key lives in `~/.local/state/xray/certs/` and is only trusted by the
-agent `xray` launches (via `NODE_EXTRA_CA_CERTS` / `SSL_CERT_FILE`), not by your
-system. If that trade-off isn't acceptable to you, don't use this.
+To count requests, the proxy sits in the plaintext path **on your own machine**,
+and while it runs your system proxy points at it. It can see request contents
+and auth headers for the model hosts as they pass through; it never logs,
+stores, or transmits them, and nothing leaves `127.0.0.1`. Everything else is
+tunneled without being decrypted. The generated CA private key lives in
+`~/.local/state/xray/certs/`; trusting it lets local apps talk to the model
+hosts through `xray`. If that trade-off isn't acceptable to you, don't use this.
 
 ## Requirements
 

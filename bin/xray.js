@@ -46,6 +46,7 @@ function main() {
   const command = AGENTS[wrap[0]] || wrap[0];
   const label = AGENTS[wrap[0]] ? wrap[0] : "";
   const certs = ensureCerts();
+  trustCA(certs.ca);
   const statePath = path.join(stateDir, `${label || "session"}.json`);
   writeState(statePath, label, 0);
 
@@ -54,9 +55,12 @@ function main() {
   proxy.listen(0, "127.0.0.1", () => {
     const { port } = proxy.address();
     const window = openWindow(statePath);
+    captureSystemProxy();
+    setSystemProxy(port); // route GUI apps (agent apps, browser, ...) through xray too
     const child = spawn(command, wrap.slice(1), { stdio: "inherit", env: childEnv(port, certs) });
     process.on("SIGINT", () => {}); // the agent owns Ctrl-C; we exit when it does
-    process.on("exit", () => { kill(child); kill(window); }); // never leak the agent or window
+    for (const sig of ["SIGTERM", "SIGHUP"]) process.on(sig, () => process.exit(0)); // always reach the revert
+    process.on("exit", () => { restoreSystemProxy(); kill(child); kill(window); }); // revert & don't leak
     child.on("error", (e) => exit(`failed to launch ${command}: ${e.message}`));
     child.on("exit", (code) => process.exit(code ?? 0));
   });
@@ -142,6 +146,59 @@ function openWindow(statePath) {
   if (process.platform !== "darwin") return null;
   const script = path.join(path.dirname(self), "xray-window.jxa");
   return spawn("osascript", ["-l", "JavaScript", script, statePath], { stdio: "ignore" });
+}
+
+// ---- system proxy (counts GUI apps, not just this shell) ----
+
+// macOS routes apps that honor the system proxy through xray. We remember each
+// service's prior setting so we can put it back exactly on exit.
+let priorProxy = [];
+
+function eachService(fn) {
+  if (process.platform !== "darwin") return;
+  const out = spawnSync("networksetup", ["-listallnetworkservices"], { encoding: "utf8" }).stdout || "";
+  for (const line of out.split("\n").slice(1)) {
+    const svc = line.trim();
+    if (svc && !svc.startsWith("*")) fn(svc); // a leading * marks a disabled service
+  }
+}
+
+function captureSystemProxy() {
+  priorProxy = [];
+  eachService((svc) => {
+    const o = spawnSync("networksetup", ["-getsecurewebproxy", svc], { encoding: "utf8" }).stdout || "";
+    priorProxy.push({
+      svc,
+      on: /Enabled:\s*Yes/.test(o),
+      server: (o.match(/Server:\s*(.*)/)?.[1] || "").trim(),
+      port: (o.match(/Port:\s*(.*)/)?.[1] || "").trim(),
+    });
+  });
+}
+
+function setSystemProxy(port) {
+  for (const { svc } of priorProxy) {
+    spawnSync("networksetup", ["-setsecurewebproxy", svc, "127.0.0.1", String(port)]);
+  }
+}
+
+function restoreSystemProxy() {
+  for (const p of priorProxy) {
+    // Restore a real prior proxy; otherwise turn it off (ignore a stale xray one).
+    if (p.on && p.server && p.server !== "127.0.0.1") {
+      spawnSync("networksetup", ["-setsecurewebproxy", p.svc, p.server, p.port]);
+    } else {
+      spawnSync("networksetup", ["-setsecurewebproxystate", p.svc, "off"]);
+    }
+  }
+}
+
+// Trust our CA so apps don't error on the intercepted hosts. One-time; prompts.
+function trustCA(ca) {
+  if (process.platform !== "darwin" || process.env.XRAY_NO_TRUST) return;
+  if (spawnSync("security", ["verify-cert", "-c", ca]).status === 0) return;
+  spawnSync("security", ["add-trusted-cert", "-r", "trustRoot",
+    "-k", path.join(home, "Library/Keychains/login.keychain-db"), ca], { stdio: "inherit" });
 }
 
 // ---- certificates ----
