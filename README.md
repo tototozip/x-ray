@@ -3,13 +3,14 @@
 Minimal live LLM-call counter for coding agents.
 
 ```sh
-npx @tototozip/x-ray
+npm install -g github:tototozip/x-ray
+xray
 ```
 
 By default it watches Codex and prints one live line:
 
 ```txt
-codex calls: 0
+codex llm calls: 0
 ```
 
 Supported adapters:
@@ -26,6 +27,7 @@ It is intentionally local-only. It reads the agent's own local session/event fil
 
 ## How It Counts
 
+- It counts model inference calls, not user prompts or agent tasks. One user request can increment the counter many times.
 - Codex: counts new `event_msg` / `token_count` rows in `~/.codex/sessions`.
 - opencode: counts new `session.next.step.ended` rows in the local SQLite DB.
 - OpenClaw: counts new assistant JSONL messages with non-zero `usage`.

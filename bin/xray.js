@@ -159,7 +159,7 @@ function opencodeDb() {
 }
 
 function render(label, calls, first = false) {
-  const line = `${label} calls: ${calls}`;
+  const line = `${label} llm calls: ${calls}`;
   if (!process.stdout.isTTY) return (first || calls > 0) && console.log(line);
   process.stdout.write(`\r${line}`);
 }

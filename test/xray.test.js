@@ -20,7 +20,7 @@ test("counts existing Codex token_count rows", () => {
   );
   const result = run(["codex", "--once", "--path", dir]);
   assert.equal(result.status, 0);
-  assert.match(result.stdout, /codex calls: 2/);
+  assert.match(result.stdout, /codex llm calls: 2/);
 });
 
 test("counts OpenClaw assistant usage rows", () => {
@@ -35,10 +35,10 @@ test("counts OpenClaw assistant usage rows", () => {
   );
   const result = run(["openclaw", "--once", "--path", dir]);
   assert.equal(result.status, 0);
-  assert.match(result.stdout, /openclaw calls: 1/);
+  assert.match(result.stdout, /openclaw llm calls: 1/);
 });
 
-test("updates live from appended Codex rows", async () => {
+test("updates live for multiple Codex LLM calls in one session file", async () => {
   const dir = temp();
   const file = path.join(dir, "live.jsonl");
   fs.writeFileSync(file, "");
@@ -52,9 +52,11 @@ test("updates live from appended Codex rows", async () => {
     output += chunk.toString();
   });
 
-  await waitFor(() => output.includes("codex calls: 0"));
+  await waitFor(() => output.includes("codex llm calls: 0"));
   fs.appendFileSync(file, `${JSON.stringify({ type: "event_msg", payload: { type: "token_count" } })}\n`);
-  await waitFor(() => output.includes("codex calls: 1"));
+  await waitFor(() => output.includes("codex llm calls: 1"));
+  fs.appendFileSync(file, `${JSON.stringify({ type: "event_msg", payload: { type: "token_count" } })}\n`);
+  await waitFor(() => output.includes("codex llm calls: 2"));
   child.kill("SIGINT");
 });
 
@@ -66,7 +68,7 @@ test("counts opencode step-ended rows when sqlite3 is present", { skip: !has("sq
   ]);
   const result = run(["opencode", "--once", "--path", db]);
   assert.equal(result.status, 0);
-  assert.match(result.stdout, /opencode calls: 1/);
+  assert.match(result.stdout, /opencode llm calls: 1/);
 });
 
 function run(args) {
