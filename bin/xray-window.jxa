@@ -1,9 +1,17 @@
 ObjC.import("Cocoa")
 
-const statePath = $.NSProcessInfo.processInfo.arguments.objectAtIndex(4).js
+const args = $.NSProcessInfo.processInfo.arguments
+const statePath = ObjC.unwrap(args.objectAtIndex(args.count - 1))
 const app = $.NSApplication.sharedApplication
 const width = 220
 const height = 70
+
+function readStateLabel() {
+  const text = $.NSString.stringWithContentsOfFileEncodingError(statePath, $.NSUTF8StringEncoding, null)
+  if (!text) return null
+  const state = JSON.parse(ObjC.unwrap(text))
+  return `${state.label} llm calls: ${state.calls}`
+}
 
 ObjC.registerSubclass({
   name: "XRayTick",
@@ -16,10 +24,8 @@ ObjC.registerSubclass({
           return
         }
         try {
-          const text = $.NSString.stringWithContentsOfFileEncodingError(statePath, $.NSUTF8StringEncoding, null)
-          if (!text) return
-          const state = JSON.parse(ObjC.unwrap(text))
-          label.setStringValue(`${state.label} llm calls: ${state.calls}`)
+          const text = readStateLabel()
+          if (text) label.setStringValue(text)
         } catch (_) {}
       },
     },
@@ -28,13 +34,7 @@ ObjC.registerSubclass({
 
 app.setActivationPolicy($.NSApplicationActivationPolicyAccessory)
 
-const screen = $.NSScreen.mainScreen.visibleFrame
-const rect = $.NSMakeRect(
-  screen.origin.x + screen.size.width - width - 24,
-  screen.origin.y + screen.size.height - height - 24,
-  width,
-  height,
-)
+const rect = $.NSMakeRect(80, 80, width, height)
 const style = $.NSWindowStyleMaskTitled | $.NSWindowStyleMaskClosable | $.NSWindowStyleMaskNonactivatingPanel
 const win = $.NSPanel.alloc.initWithContentRectStyleMaskBackingDefer(rect, style, $.NSBackingStoreBuffered, false)
 
@@ -45,7 +45,7 @@ win.setOpaque(false)
 win.setBackgroundColor($.NSColor.colorWithCalibratedWhiteAlpha(0.08, 0.92))
 
 const label = $.NSTextField.alloc.initWithFrame($.NSMakeRect(12, 19, width - 24, 30))
-label.setStringValue("codex llm calls: 0")
+label.setStringValue(readStateLabel() || "xray")
 label.setTextColor($.NSColor.whiteColor)
 label.setBezeled(false)
 label.setDrawsBackground(false)
