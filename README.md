@@ -29,18 +29,16 @@ local certificate (needed to read the count); after that it just works.
 Every model inference is one HTTPS request from your machine to the provider's
 API. `xray` counts those requests directly, at the source:
 
-- It starts a local proxy on `127.0.0.1` and routes traffic to it three ways:
-  the macOS **system proxy** (browsers and other apps that honor it), GUI
-  **`launchctl` env vars** (agent apps whose engine ignores the system proxy and
-  reads `HTTPS_PROXY` instead, like the Codex app), and a **wrapped shell**
-  (terminal agents) — so calls from anywhere flow through `xray`.
+- It starts a local proxy on `127.0.0.1` and points agents at it two ways: a
+  **wrapped shell** (so terminal agents inherit `HTTPS_PROXY`) and GUI
+  **`launchctl` env vars** (so a relaunched agent app's engine — which reads
+  `HTTPS_PROXY`, not the system proxy — routes through xray too).
 - For the model API hosts (`api.openai.com`, `api.anthropic.com`,
   `chatgpt.com`) it terminates TLS with a local CA it generates on first run,
   counts each `POST` to an inference endpoint (`/responses`, `/v1/messages`,
   `/chat/completions`), and forwards the request on untouched.
 - Every other host is tunneled straight through, never decrypted.
-- On exit it restores your previous proxy setting (and does so even on Ctrl-C,
-  a closed terminal, or `kill`).
+- On exit it clears the env it set — even on Ctrl-C, a closed terminal, or `kill`.
 
 Because it counts the actual request the moment it leaves, the number is exact
 and has no lag — one user prompt can increment it many times (each tool
@@ -49,13 +47,13 @@ declines it so Codex uses the countable HTTPS path.
 
 ## The trade-off
 
-To count requests, the proxy sits in the plaintext path **on your own machine**,
-and while it runs your system proxy points at it. It can see request contents
-and auth headers for the model hosts as they pass through; it never logs,
-stores, or transmits them, and nothing leaves `127.0.0.1`. Everything else is
-tunneled without being decrypted. The generated CA private key lives in
-`~/.local/state/xray/certs/`; trusting it lets local apps talk to the model
-hosts through `xray`. If that trade-off isn't acceptable to you, don't use this.
+To count requests, the proxy sits in the plaintext path **on your own machine**.
+It can see request contents and auth headers for the model hosts as they pass
+through; it never logs, stores, or transmits them, and nothing leaves
+`127.0.0.1`. Everything else is tunneled without being decrypted. The generated
+CA private key lives in `~/.local/state/xray/certs/`; trusting it lets local
+apps talk to the model hosts through `xray`. If that trade-off isn't acceptable
+to you, don't use this.
 
 ## Requirements
 

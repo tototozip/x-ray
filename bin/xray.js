@@ -17,7 +17,7 @@ const self = fileURLToPath(import.meta.url);
 // LLM API hosts to intercept. Inference requests to these are counted; all
 // other traffic is tunneled through untouched.
 const HOSTS = ["api.openai.com", "api.anthropic.com", "chatgpt.com"];
-const AGENTS = { codex: "codex", claude: "claude" };
+const AGENTS = new Set(["codex", "claude"]); // known agent names, used only for the window label
 
 // One inference call == one POST to a model endpoint.
 export const isCall = (method, p) =>
@@ -43,8 +43,8 @@ function main() {
   // With no arguments, wrap an interactive shell so every agent run inside it
   // is counted; otherwise wrap the given agent/command directly.
   const wrap = argv.length ? argv : [process.env.SHELL || "/bin/zsh", "-i"];
-  const command = AGENTS[wrap[0]] || wrap[0];
-  const label = AGENTS[wrap[0]] ? wrap[0] : "";
+  const command = wrap[0];
+  const label = AGENTS.has(command) ? command : "";
   const certs = ensureCerts();
   trustCA(certs.ca);
   const statePath = path.join(stateDir, `${label || "session"}.json`);
@@ -55,13 +55,11 @@ function main() {
   proxy.listen(0, "127.0.0.1", () => {
     const { port } = proxy.address();
     const window = openWindow(statePath);
-    captureSystemProxy();
-    setSystemProxy(port); // GUI apps that honor the system proxy (e.g. browsers)
-    setGuiEnv(port, certs); // GUI apps whose engine honors only env vars (e.g. the Codex app)
+    setGuiEnv(port, certs); // so GUI agent apps (e.g. the Codex app) route through xray once relaunched
     const child = spawn(command, wrap.slice(1), { stdio: "inherit", env: childEnv(port, certs) });
     process.on("SIGINT", () => {}); // the agent owns Ctrl-C; we exit when it does
-    for (const sig of ["SIGTERM", "SIGHUP"]) process.on(sig, () => process.exit(0)); // always reach the revert
-    process.on("exit", () => { restoreSystemProxy(); unsetGuiEnv(); kill(child); kill(window); }); // revert & don't leak
+    for (const sig of ["SIGTERM", "SIGHUP"]) process.on(sig, () => process.exit(0)); // always reach the cleanup
+    process.on("exit", () => { unsetGuiEnv(); kill(child); kill(window); }); // clear env & don't leak
     child.on("error", (e) => exit(`failed to launch ${command}: ${e.message}`));
     child.on("exit", (code) => process.exit(code ?? 0));
   });
@@ -149,66 +147,23 @@ function openWindow(statePath) {
   return spawn("osascript", ["-l", "JavaScript", script, statePath], { stdio: "ignore" });
 }
 
-// ---- system proxy (counts GUI apps, not just this shell) ----
-
-// macOS routes apps that honor the system proxy through xray. We remember each
-// service's prior setting so we can put it back exactly on exit.
-let priorProxy = [];
-
-function eachService(fn) {
-  if (process.platform !== "darwin") return;
-  const out = spawnSync("networksetup", ["-listallnetworkservices"], { encoding: "utf8" }).stdout || "";
-  for (const line of out.split("\n").slice(1)) {
-    const svc = line.trim();
-    if (svc && !svc.startsWith("*")) fn(svc); // a leading * marks a disabled service
-  }
-}
-
-function captureSystemProxy() {
-  priorProxy = [];
-  eachService((svc) => {
-    const o = spawnSync("networksetup", ["-getsecurewebproxy", svc], { encoding: "utf8" }).stdout || "";
-    priorProxy.push({
-      svc,
-      on: /Enabled:\s*Yes/.test(o),
-      server: (o.match(/Server:\s*(.*)/)?.[1] || "").trim(),
-      port: (o.match(/Port:\s*(.*)/)?.[1] || "").trim(),
-    });
-  });
-}
-
-function setSystemProxy(port) {
-  for (const { svc } of priorProxy) {
-    spawnSync("networksetup", ["-setsecurewebproxy", svc, "127.0.0.1", String(port)]);
-  }
-}
-
-function restoreSystemProxy() {
-  for (const p of priorProxy) {
-    // Restore a real prior proxy; otherwise turn it off (ignore a stale xray one).
-    if (p.on && p.server && p.server !== "127.0.0.1") {
-      spawnSync("networksetup", ["-setsecurewebproxy", p.svc, p.server, p.port]);
-    } else {
-      spawnSync("networksetup", ["-setsecurewebproxystate", p.svc, "off"]);
-    }
-  }
-}
+// ---- GUI app env ----
 
 // GUI apps launched after this inherit the proxy env, so an agent app's engine
-// (e.g. the Codex app's Rust core, which ignores the system proxy) routes
-// through xray. Relaunch the app after starting xray to pick it up.
-const GUI_ENV = { HTTP_PROXY: 1, HTTPS_PROXY: 1, ALL_PROXY: 1, NODE_EXTRA_CA_CERTS: 1, SSL_CERT_FILE: 1 };
+// (e.g. the Codex app's Rust core, which ignores the system proxy and reads
+// HTTPS_PROXY) routes through xray. Relaunch the app after starting xray.
+const GUI_ENV = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE"];
 
 function setGuiEnv(port, certs) {
   if (process.platform !== "darwin") return;
   const url = `http://127.0.0.1:${port}`;
   const val = { HTTP_PROXY: url, HTTPS_PROXY: url, ALL_PROXY: url, NODE_EXTRA_CA_CERTS: certs.ca, SSL_CERT_FILE: certs.bundle };
-  for (const k of Object.keys(GUI_ENV)) spawnSync("launchctl", ["setenv", k, val[k]]);
+  for (const k of GUI_ENV) spawnSync("launchctl", ["setenv", k, val[k]]);
 }
 
 function unsetGuiEnv() {
   if (process.platform !== "darwin") return;
-  for (const k of Object.keys(GUI_ENV)) spawnSync("launchctl", ["unsetenv", k]);
+  for (const k of GUI_ENV) spawnSync("launchctl", ["unsetenv", k]);
 }
 
 // Trust our CA so apps don't error on the intercepted hosts. One-time; prompts.
