@@ -1,30 +1,19 @@
 #!/usr/bin/env node
 import http from "node:http";
-import https from "node:https";
-import net from "node:net";
-import tls from "node:tls";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const home = os.homedir();
 const stateDir = path.join(process.env.XDG_STATE_HOME || path.join(home, ".local", "state"), "xray");
-const certDir = path.join(stateDir, "certs");
 const self = fileURLToPath(import.meta.url);
 
-// LLM API hosts to intercept. Inference requests to these are counted; all
-// other traffic is tunneled through untouched.
-const HOSTS = ["api.openai.com", "api.anthropic.com", "chatgpt.com"];
-const AGENTS = new Set(["codex", "claude"]); // known agent names, used only for the window label
+const beginMarker = "# >>> xray codex telemetry >>>";
+const endMarker = "# <<< xray codex telemetry <<<";
+const countedEvents = new Set(["codex.api_request", "codex.websocket.request"]);
 
-// One inference call == one POST to a model endpoint.
-export const isCall = (method, p) =>
-  method === "POST" && /\/(responses|chat\/completions|messages)(\?|$)/.test(p);
-
-// Run as a CLI when executed directly. npm installs the global binary as a
-// symlink, so resolve it before comparing (otherwise main() never fires).
 if (isMain()) main();
 
 function isMain() {
@@ -38,106 +27,267 @@ function isMain() {
 function main() {
   const argv = process.argv.slice(2);
   if (argv[0] === "-h" || argv[0] === "--help") {
-    return exit("usage: xray [agent|command...]\n  xray         count every LLM call in a fresh shell\n  xray codex   count a single agent", 0);
+    return exit("usage: xray\n\nCounts Codex LLM calls until you press Ctrl-C or close the window.", 0);
   }
-  // With no arguments, wrap an interactive shell so every agent run inside it
-  // is counted; otherwise wrap the given agent/command directly.
-  const wrap = argv.length ? argv : [process.env.SHELL || "/bin/zsh", "-i"];
-  const command = wrap[0];
-  const label = AGENTS.has(command) ? command : "";
-  const certs = ensureCerts();
-  trustCA(certs.ca);
-  const statePath = path.join(stateDir, `${label || "session"}.json`);
-  writeState(statePath, label, 0);
+  if (argv.length) return exit("xray now runs as one global Codex counter: run `xray` with no arguments.");
 
+  fs.mkdirSync(stateDir, { recursive: true });
+  const statePath = path.join(stateDir, "codex.json");
   let calls = 0;
-  const proxy = startProxy(certs, () => writeState(statePath, label, ++calls));
-  proxy.listen(0, "127.0.0.1", () => {
-    const { port } = proxy.address();
-    const window = openWindow(statePath);
-    setGuiEnv(port, certs); // so GUI agent apps (e.g. the Codex app) route through xray once relaunched
-    const child = spawn(command, wrap.slice(1), { stdio: "inherit", env: childEnv(port, certs) });
-    process.on("SIGINT", () => {}); // the agent owns Ctrl-C; we exit when it does
-    for (const sig of ["SIGTERM", "SIGHUP"]) process.on(sig, () => process.exit(0)); // always reach the cleanup
-    process.on("exit", () => { unsetGuiEnv(); kill(child); kill(window); }); // clear env & don't leak
-    child.on("error", (e) => exit(`failed to launch ${command}: ${e.message}`));
-    child.on("exit", (code) => process.exit(code ?? 0));
+  writeState(statePath, calls, "starting");
+
+  const metricState = new Map();
+  const collector = startOtelCollector({
+    onCalls(n) {
+      calls += n;
+      writeState(statePath, calls, "counting");
+    },
+    metricState,
   });
+
+  collector.listen(0, "127.0.0.1", () => {
+    const { port } = collector.address();
+    const endpoint = `http://127.0.0.1:${port}`;
+    let restoreConfig;
+    let window;
+    let stopped = false;
+
+    try {
+      restoreConfig = installCodexTelemetryConfig(port);
+      writeState(statePath, calls, "counting");
+      window = openWindow(statePath);
+      console.log("xray: counting Codex LLM calls. Press Ctrl-C or close the window to stop.");
+    } catch (e) {
+      collector.close();
+      return exit(`xray failed to start: ${e.message}`);
+    }
+
+    const stop = (code = 0) => {
+      if (stopped) return;
+      stopped = true;
+      writeState(statePath, calls, "stopping");
+      try { restoreConfig?.(); } catch (e) { console.error(`xray restore warning: ${e.message}`); }
+      try { collector.close(); } catch {}
+      kill(window);
+      process.exit(code);
+    };
+
+    process.on("SIGINT", () => stop(0));
+    for (const sig of ["SIGTERM", "SIGHUP"]) process.on(sig, () => stop(0));
+    process.on("exit", () => {
+      if (!stopped) {
+        try { restoreConfig?.(); } catch {}
+      }
+    });
+    window?.on("exit", () => stop(0));
+    process.stdin.resume();
+
+    // Keep the endpoint visible in verbose shells without making it part of
+    // the product surface.
+    if (process.env.XRAY_DEBUG) console.error(`xray OTLP endpoint: ${endpoint}`);
+  });
+
+  collector.on("error", (e) => exit(`xray failed to listen on 127.0.0.1: ${e.message}`));
 }
 
 const kill = (p) => { try { p?.kill(); } catch {} };
 
-function childEnv(port, certs) {
-  const url = `http://127.0.0.1:${port}`;
-  return {
-    ...process.env,
-    HTTP_PROXY: url, HTTPS_PROXY: url, ALL_PROXY: url,
-    http_proxy: url, https_proxy: url, all_proxy: url,
-    NODE_EXTRA_CA_CERTS: certs.ca, // Node adds this to its defaults
-    SSL_CERT_FILE: certs.bundle, // Rust/OpenSSL replace defaults, so use the merged bundle
-  };
+// ---- Codex OpenTelemetry collector ----
+
+function startOtelCollector({ onCalls, metricState = new Map() }) {
+  return http.createServer((req, res) => {
+    if (req.method !== "POST") return res.writeHead(405).end();
+
+    const chunks = [];
+    req.on("data", (chunk) => chunks.push(chunk));
+    req.on("end", () => {
+      let calls = 0;
+      try {
+        const body = Buffer.concat(chunks).toString("utf8");
+        const payload = body ? JSON.parse(body) : {};
+        calls = countOtelCalls(payload, { metricState });
+      } catch {
+        // Codex is configured to send JSON. If that changes, do not break Codex;
+        // just accept the export and keep counting from future parseable data.
+      }
+      if (calls) onCalls(calls);
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end("{}");
+    });
+    req.on("error", () => res.destroy());
+  });
 }
 
-// ---- counting proxy ----
+export function countOtelCalls(payload, { metricState = new Map() } = {}) {
+  const logCalls = countLogCalls(payload);
+  if (logCalls) return logCalls;
+  return countMetricCalls(payload, metricState);
+}
 
-function startProxy(certs, onCall) {
-  const key = fs.readFileSync(certs.leafKey);
-  const cert = fs.readFileSync(certs.leafCert);
-  const intercept = new Set(HOSTS);
+function countLogCalls(payload) {
+  let calls = 0;
+  for (const record of walkLogRecords(payload)) {
+    const attrs = attributesToObject(record.attributes);
+    const name = attrs["event.name"] || bodyString(record.body);
+    if (!countedEvents.has(name)) continue;
+    if (name === "codex.api_request" && isNonInferenceApiRequest(attrs, record)) continue;
+    calls += 1;
+  }
+  return calls;
+}
 
-  // A peer resetting a connection must never take down the wrapped session.
-  const ignore = new Set(["ECONNRESET", "EPIPE", "ECONNABORTED", "ERR_STREAM_DESTROYED"]);
-  process.on("uncaughtException", (e) => { if (!ignore.has(e?.code)) throw e; });
-  const quiet = (s) => s.on("error", () => {});
-
-  const inner = http.createServer((creq, cres) => {
-    const host = (creq.headers.host || "").split(":")[0];
-    if (isCall(creq.method, creq.url)) onCall();
-    const up = https.request(
-      { host, port: 443, method: creq.method, path: creq.url, headers: creq.headers },
-      (ures) => {
-        ures.on("error", () => cres.destroy());
-        cres.writeHead(ures.statusCode, ures.headers);
-        ures.pipe(cres);
-      },
-    );
-    up.on("error", () => cres.destroy());
-    creq.on("error", () => up.destroy());
-    creq.pipe(up);
-  });
-  // Refuse websocket upgrades so the agent falls back to the countable HTTPS path.
-  inner.on("upgrade", (_req, sock) => {
-    quiet(sock);
-    sock.end("HTTP/1.1 426 Upgrade Required\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
-  });
-
-  const tlsServer = tls.createServer({ key, cert, ALPNProtocols: ["http/1.1"] }, (s) => {
-    quiet(s);
-    inner.emit("connection", s);
-  });
-  tlsServer.on("tlsClientError", () => {});
-
-  const proxy = http.createServer((_req, res) => res.writeHead(405).end());
-  proxy.on("clientError", () => {});
-  proxy.on("connect", (req, client, head) => {
-    quiet(client);
-    const [host, port] = req.url.split(":");
-    if (intercept.has(host)) {
-      client.write("HTTP/1.1 200 Connection Established\r\n\r\n");
-      if (head?.length) client.unshift(head);
-      tlsServer.emit("connection", client);
-    } else {
-      const up = net.connect(Number(port) || 443, host, () => {
-        client.write("HTTP/1.1 200 Connection Established\r\n\r\n");
-        if (head?.length) up.write(head);
-        client.pipe(up);
-        up.pipe(client);
-      });
-      up.on("error", () => client.destroy());
+function* walkLogRecords(payload) {
+  for (const resource of payload?.resourceLogs || []) {
+    for (const scope of resource.scopeLogs || []) {
+      for (const record of scope.logRecords || []) yield record;
     }
-  });
-  return proxy;
+  }
 }
+
+function countMetricCalls(payload, metricState) {
+  let calls = 0;
+  for (const metric of walkMetrics(payload)) {
+    if (!["codex.api_request.duration_ms", "codex.websocket.request.duration_ms"].includes(metric.name)) continue;
+    const points = metric.histogram?.dataPoints || metric.sum?.dataPoints || [];
+    const temporality = metric.histogram?.aggregationTemporality ?? metric.sum?.aggregationTemporality;
+    for (const point of points) {
+      const attrs = attributesToObject(point.attributes);
+      if (metric.name === "codex.api_request.duration_ms" && isNonInferenceApiRequest(attrs, point)) continue;
+      const value = Number(point.count ?? point.asInt ?? point.asDouble ?? 0);
+      if (!Number.isFinite(value) || value <= 0) continue;
+      if (temporality === 1) {
+        calls += value;
+        continue;
+      }
+      const key = `${metric.name}:${JSON.stringify(attrs)}:${point.startTimeUnixNano || ""}`;
+      const prior = metricState.get(key) || 0;
+      metricState.set(key, value);
+      calls += value >= prior ? value - prior : value;
+    }
+  }
+  return calls;
+}
+
+function* walkMetrics(payload) {
+  for (const resource of payload?.resourceMetrics || []) {
+    for (const scope of resource.scopeMetrics || []) {
+      for (const metric of scope.metrics || []) yield metric;
+    }
+  }
+}
+
+function isNonInferenceApiRequest(attrs, record) {
+  const haystack = [
+    bodyString(record?.body),
+    ...Object.entries(attrs).flatMap(([k, v]) => [k, v]),
+  ].map(String).join("\n");
+  return /\/models(\?|$|[\s"'])/.test(haystack);
+}
+
+function attributesToObject(attrs = []) {
+  const out = {};
+  for (const attr of attrs) out[attr.key] = otelValue(attr.value);
+  return out;
+}
+
+function otelValue(value) {
+  if (!value || typeof value !== "object") return value;
+  if ("stringValue" in value) return value.stringValue;
+  if ("intValue" in value) return value.intValue;
+  if ("doubleValue" in value) return value.doubleValue;
+  if ("boolValue" in value) return value.boolValue;
+  if ("arrayValue" in value) return value.arrayValue?.values?.map(otelValue) || [];
+  if ("kvlistValue" in value) return attributesToObject(value.kvlistValue?.values || []);
+  return value;
+}
+
+function bodyString(body) {
+  const v = otelValue(body);
+  return typeof v === "string" ? v : "";
+}
+
+// ---- Codex config patching ----
+
+export function installCodexTelemetryConfig(port, { codexHome = process.env.CODEX_HOME || path.join(home, ".codex") } = {}) {
+  const configPath = path.join(codexHome, "config.toml");
+  fs.mkdirSync(codexHome, { recursive: true });
+
+  const original = readFileIfExists(configPath);
+  const originalMode = fileMode(configPath);
+  const next = withXrayOtelConfig(original, port);
+  atomicWrite(configPath, next, originalMode);
+
+  return () => restoreCodexTelemetryConfig(configPath, original, originalMode);
+}
+
+export function withXrayOtelConfig(config, port) {
+  const clean = stripManagedBlock(config);
+  const withoutOtel = removeTopLevelTables(clean, "otel").trimEnd();
+  const block = buildCodexOtelBlock(port);
+  return `${withoutOtel}${withoutOtel ? "\n\n" : ""}${block}\n`;
+}
+
+function restoreCodexTelemetryConfig(configPath, original, mode) {
+  const current = readFileIfExists(configPath);
+  const restored = stripManagedBlock(current).trim();
+  const finalContent = original;
+  if (!restored && !finalContent) {
+    try { fs.unlinkSync(configPath); } catch {}
+    return;
+  }
+  atomicWrite(configPath, finalContent, mode);
+}
+
+function buildCodexOtelBlock(port) {
+  const base = `http://127.0.0.1:${port}`;
+  return `${beginMarker}
+[otel]
+enabled = true
+environment = "xray"
+exporter = { otlp-http = { endpoint = "${base}/v1/logs", protocol = "json" } }
+metrics_exporter = { otlp-http = { endpoint = "${base}/v1/metrics", protocol = "json" } }
+traces_exporter = { otlp-http = { endpoint = "${base}/v1/traces", protocol = "json" } }
+${endMarker}`;
+}
+
+function stripManagedBlock(config) {
+  return config.replace(new RegExp(`\\n?${escapeRegExp(beginMarker)}[\\s\\S]*?${escapeRegExp(endMarker)}\\n?`, "g"), "\n");
+}
+
+function removeTopLevelTables(config, name) {
+  const lines = config.split("\n");
+  const kept = [];
+  let dropping = false;
+  for (const line of lines) {
+    const table = parseTableHeader(line);
+    if (table) dropping = table[0] === name;
+    if (!dropping) kept.push(line);
+  }
+  return kept.join("\n");
+}
+
+function parseTableHeader(line) {
+  const m = line.match(/^\s*\[([^\[\]]+)\]\s*(?:#.*)?$/);
+  if (!m) return null;
+  return m[1].split(".").map((part) => part.trim().replace(/^"|"$/g, ""));
+}
+
+function readFileIfExists(file) {
+  try { return fs.readFileSync(file, "utf8"); } catch { return ""; }
+}
+
+function fileMode(file) {
+  try { return fs.statSync(file).mode & 0o777; } catch { return 0o600; }
+}
+
+function atomicWrite(file, content, mode = 0o600) {
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, content, { mode });
+  fs.renameSync(tmp, file);
+  try { fs.chmodSync(file, mode); } catch {}
+}
+
+const escapeRegExp = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 // ---- window ----
 
@@ -147,86 +297,10 @@ function openWindow(statePath) {
   return spawn("osascript", ["-l", "JavaScript", script, statePath], { stdio: "ignore" });
 }
 
-// ---- GUI app env ----
-
-// GUI apps launched after this inherit the proxy env, so an agent app's engine
-// (e.g. the Codex app's Rust core, which ignores the system proxy and reads
-// HTTPS_PROXY) routes through xray. Relaunch the app after starting xray.
-const GUI_ENV = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE"];
-
-function setGuiEnv(port, certs) {
-  if (process.platform !== "darwin") return;
-  const url = `http://127.0.0.1:${port}`;
-  const val = { HTTP_PROXY: url, HTTPS_PROXY: url, ALL_PROXY: url, NODE_EXTRA_CA_CERTS: certs.ca, SSL_CERT_FILE: certs.bundle };
-  for (const k of GUI_ENV) spawnSync("launchctl", ["setenv", k, val[k]]);
-}
-
-function unsetGuiEnv() {
-  if (process.platform !== "darwin") return;
-  for (const k of GUI_ENV) spawnSync("launchctl", ["unsetenv", k]);
-}
-
-// Trust our CA so apps don't error on the intercepted hosts. One-time; prompts.
-function trustCA(ca) {
-  if (process.platform !== "darwin" || process.env.XRAY_NO_TRUST) return;
-  if (spawnSync("security", ["verify-cert", "-c", ca]).status === 0) return;
-  spawnSync("security", ["add-trusted-cert", "-r", "trustRoot",
-    "-k", path.join(home, "Library/Keychains/login.keychain-db"), ca], { stdio: "inherit" });
-}
-
-// ---- certificates ----
-
-// A local CA + one leaf covering the intercepted hosts, plus a bundle that
-// merges the system roots with our CA (for TLS stacks that replace, not extend).
-export function ensureCerts() {
-  fs.mkdirSync(certDir, { recursive: true });
-  const ca = path.join(certDir, "ca-cert.pem");
-  const caKey = path.join(certDir, "ca-key.pem");
-  const leafCert = path.join(certDir, "leaf-cert.pem");
-  const leafKey = path.join(certDir, "leaf-key.pem");
-  const bundle = path.join(certDir, "bundle.pem");
-
-  if (!fs.existsSync(ca)) {
-    openssl(["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", caKey, "-out", ca,
-      "-days", "3650", "-subj", "/CN=x-ray local CA",
-      "-addext", "basicConstraints=critical,CA:TRUE",
-      "-addext", "keyUsage=critical,keyCertSign,cRLSign"]);
-  }
-  if (!fs.existsSync(leafCert)) {
-    const csr = path.join(certDir, "leaf.csr");
-    const ext = path.join(certDir, "leaf.ext");
-    fs.writeFileSync(ext, `basicConstraints=CA:FALSE
-keyUsage=critical,digitalSignature,keyEncipherment
-extendedKeyUsage=serverAuth
-subjectAltName=${HOSTS.map((h) => `DNS:${h}`).join(",")}
-`);
-    openssl(["req", "-newkey", "rsa:2048", "-nodes", "-keyout", leafKey, "-out", csr, "-subj", "/CN=x-ray"]);
-    openssl(["x509", "-req", "-in", csr, "-CA", ca, "-CAkey", caKey, "-CAcreateserial",
-      "-out", leafCert, "-days", "3650", "-extfile", ext]);
-  }
-  if (!fs.existsSync(bundle) || mtime(ca) > mtime(bundle)) {
-    const roots = spawnSync("security", ["find-certificate", "-a", "-p",
-      "/System/Library/Keychains/SystemRootCertificates.keychain"], { encoding: "utf8" }).stdout || "";
-    fs.writeFileSync(bundle, roots + fs.readFileSync(ca, "utf8"));
-  }
-  return { ca, leafKey, leafCert, bundle };
-}
-
-function openssl(args) {
-  const r = spawnSync("openssl", args, { encoding: "utf8" });
-  if (r.status !== 0) exit(`openssl failed: ${r.stderr || r.error?.message || "unknown"}`);
-}
-
-// ---- state file (read by xray-window.jxa) ----
-
-function writeState(file, label, calls) {
+function writeState(file, calls, status) {
   const tmp = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify({ label, calls, updated: Date.now() }));
+  fs.writeFileSync(tmp, JSON.stringify({ label: "codex", calls, status, updated: Date.now() }));
   fs.renameSync(tmp, file);
-}
-
-function mtime(file) {
-  try { return fs.statSync(file).mtimeMs; } catch { return 0; }
 }
 
 function exit(message, code = 1) {
