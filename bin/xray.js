@@ -12,7 +12,7 @@ const self = fileURLToPath(import.meta.url);
 
 const beginMarker = "# >>> xray codex telemetry >>>";
 const endMarker = "# <<< xray codex telemetry <<<";
-const countedEvents = new Set(["codex.api_request", "codex.websocket.request"]);
+const countedEvents = new Set(["codex.api_request", "codex.websocket_request", "codex.websocket.request"]);
 
 if (isMain()) main();
 
@@ -238,15 +238,11 @@ function restoreCodexTelemetryConfig(configPath, original, mode) {
   atomicWrite(configPath, finalContent, mode);
 }
 
-function buildCodexOtelBlock(port) {
+export function buildCodexOtelBlock(port) {
   const base = `http://127.0.0.1:${port}`;
   return `${beginMarker}
 [otel]
-enabled = true
-environment = "xray"
 exporter = { otlp-http = { endpoint = "${base}/v1/logs", protocol = "json" } }
-metrics_exporter = { otlp-http = { endpoint = "${base}/v1/metrics", protocol = "json" } }
-traces_exporter = { otlp-http = { endpoint = "${base}/v1/traces", protocol = "json" } }
 ${endMarker}`;
 }
 

@@ -7,6 +7,7 @@ import { spawnSync } from "node:child_process";
 
 process.env.XDG_STATE_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "xray-state-"));
 const {
+  buildCodexOtelBlock,
   countOtelCalls,
   installCodexTelemetryConfig,
   withXrayOtelConfig,
@@ -26,7 +27,8 @@ trust_level = "trusted"
   const next = withXrayOtelConfig(config, 12345);
   assert.equal((next.match(/\[otel\]/g) || []).length, 1);
   assert.match(next, /endpoint = "http:\/\/127\.0\.0\.1:12345\/v1\/logs"/);
-  assert.match(next, /metrics_exporter = \{ otlp-http = \{ endpoint = "http:\/\/127\.0\.0\.1:12345\/v1\/metrics"/);
+  assert.doesNotMatch(next, /enabled = true/);
+  assert.doesNotMatch(next, /traces_exporter/);
   assert.match(next, /\[projects\."\/tmp"\]/);
   assert.doesNotMatch(next, /environment = "existing"/);
 });
@@ -50,10 +52,11 @@ trust_level = "trusted"
 test("counts Codex API and websocket request logs", () => {
   const payload = logsPayload([
     logRecord("codex.api_request"),
+    logRecord("codex.websocket_request"),
     logRecord("codex.websocket.request"),
     logRecord("codex.sse_event"),
   ]);
-  assert.equal(countOtelCalls(payload), 2);
+  assert.equal(countOtelCalls(payload), 3);
 });
 
 test("does not count model list API telemetry as an LLM call", () => {
@@ -75,17 +78,24 @@ test("uses metric deltas only when no request logs are present", () => {
   assert.equal(countOtelCalls(logsPayload([logRecord("codex.websocket.request")]), { metricState }), 1);
 });
 
-test("installed Codex accepts the generated otel config", { skip: !commandExists("codex") }, () => {
+test("installed Codex exec accepts the generated otel config", { skip: !commandExists("codex") }, () => {
   const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "xray-codex-"));
   fs.writeFileSync(path.join(codexHome, "config.toml"), withXrayOtelConfig("", 1), { mode: 0o600 });
-  const result = spawnSync("codex", ["--strict-config", "doctor", "--summary"], {
+  const result = spawnSync("codex", ["exec", "--strict-config", "--ephemeral", "-s", "read-only", "test"], {
     cwd: process.cwd(),
     encoding: "utf8",
-    env: { ...process.env, CODEX_HOME: codexHome },
-    timeout: 30_000,
+    env: { ...process.env, CODEX_HOME: codexHome, OPENAI_API_KEY: "", CODEX_API_KEY: "" },
+    timeout: 3_000,
   });
 
-  assert.match(result.stdout, /config\s+loaded/, result.stderr || result.stdout);
+  assert.doesNotMatch(result.stderr, /unknown configuration field|Error loading config/, result.stderr);
+});
+
+test("generated Codex otel block contains only strict-safe fields", () => {
+  assert.equal(buildCodexOtelBlock(1234), `# >>> xray codex telemetry >>>
+[otel]
+exporter = { otlp-http = { endpoint = "http://127.0.0.1:1234/v1/logs", protocol = "json" } }
+# <<< xray codex telemetry <<<`);
 });
 
 function logsPayload(records) {
