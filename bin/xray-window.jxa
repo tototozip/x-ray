@@ -3,8 +3,8 @@ ObjC.import("Cocoa")
 const args = $.NSProcessInfo.processInfo.arguments
 const statePath = ObjC.unwrap(args.objectAtIndex(args.count - 1))
 const app = $.NSApplication.sharedApplication
-const width = 212
-const height = 110
+const width = 200
+const height = 178
 
 function readState() {
   const text = $.NSString.stringWithContentsOfFileEncodingError(statePath, $.NSUTF8StringEncoding, null)
@@ -40,11 +40,35 @@ win.setOpaque(false)
 win.setBackgroundColor($.NSColor.colorWithCalibratedWhiteAlpha(0.13, 1.0))
 
 const G = [0.36, 0.86, 0.52] // accent green
-function rgb(c, a) {
-  return $.NSColor.colorWithCalibratedRedGreenBlueAlpha(c[0], c[1], c[2], a)
-}
-const green = rgb(G, 1)
+const rgb = (c, a) => $.NSColor.colorWithCalibratedRedGreenBlueAlpha(c[0], c[1], c[2], a)
+const lerp = (a, b, t) => a + (b - a) * t
 const dim = $.NSColor.colorWithCalibratedWhiteAlpha(0.55, 1.0)
+
+// Use NSBox for colored shapes: it takes NSColor directly. (Setting a CGColor on
+// a CALayer through JXA crashes, so layer color setters are off-limits here.)
+function box(frame) {
+  const b = $.NSBox.alloc.initWithFrame(frame)
+  b.setBoxType($.NSBoxCustom)
+  b.setTitlePosition($.NSNoTitle)
+  b.setBorderWidth(0)
+  return b
+}
+
+// A circular gauge whose green core grows to fill the ring as calls add up.
+const D = 104
+const cx = width / 2
+const cy = 42 + D / 2
+
+const ring = box($.NSMakeRect(cx - D / 2, cy - D / 2, D, D))
+ring.setCornerRadius(D / 2)
+ring.setFillColor(rgb([0.19, 0.19, 0.19], 1))
+ring.setBorderColor(rgb(G, 0.5))
+ring.setBorderWidth(1.5)
+win.contentView.addSubview(ring)
+
+const disc = box($.NSMakeRect(cx, cy, 0, 0))
+disc.setFillColor(rgb(G, 1))
+win.contentView.addSubview(disc)
 
 function label(y, font, color) {
   const f = $.NSTextField.alloc.initWithFrame($.NSMakeRect(0, y, width, 20))
@@ -58,36 +82,22 @@ function label(y, font, color) {
   return f
 }
 
-const number = label(30, $.NSFont.monospacedDigitSystemFontOfSizeWeight(42, $.NSFontWeightBold), green)
-const caption = label(14, $.NSFont.systemFontOfSizeWeight(10.5, $.NSFontWeightSemibold), dim)
+const number = label(76, $.NSFont.monospacedDigitSystemFontOfSizeWeight(30, $.NSFontWeightBold), $.NSColor.whiteColor)
+const caption = label(16, $.NSFont.systemFontOfSizeWeight(10.5, $.NSFontWeightSemibold), dim)
 
-// Center by measuring the text and sizing the field to it — robust regardless
-// of how NSTextField alignment resolves through JXA.
+// Center by measuring the text and sizing the field to it.
 function place(f, text, y, h) {
   f.setStringValue(text)
   const attrs = $.NSDictionary.dictionaryWithObjectForKey(f.font, $.NSFontAttributeName)
-  const w = Math.ceil($(text).sizeWithAttributes(attrs).width) + 4
+  const w = Math.ceil($(text).sizeWithAttributes(attrs).width) + 6
   f.setFrame($.NSMakeRect((width - w) / 2, y, w, h))
 }
 
-// A glowing accent bar on the right edge that breathes, and flares when a call
-// lands — catches the eye from the corner of the screen.
-const barX = width - 11
-const barH = height - 30
-const bar = $.NSView.alloc.initWithFrame($.NSMakeRect(barX, 15, 4, barH))
-bar.setWantsLayer(true)
-bar.layer.setCornerRadius(2)
-bar.layer.setBackgroundColor(green.CGColor)
-bar.layer.setShadowColor(green.CGColor)
-bar.layer.setShadowRadius(5)
-bar.layer.setShadowOpacity(0.9)
-win.contentView.addSubview(bar)
-
-const blend = (lift) => rgb([G[0] + (1 - G[0]) * lift, G[1] + (1 - G[1]) * lift, G[2] + (1 - G[2]) * lift], 1)
+const K = 30 // the core approaches full as calls grow (about half-full around K calls)
 
 let shownCalls = null
 let shownPrefix = null
-let phase = 0
+let displayFrac = 0
 let flash = 0 // 1 on a new call, decays each frame
 
 function tick() {
@@ -97,23 +107,25 @@ function tick() {
   const prefix = state && state.label ? String(state.label).toUpperCase() + " · " : ""
   if (calls !== shownCalls || prefix !== shownPrefix) {
     if (shownCalls !== null && calls > shownCalls) flash = 1
-    place(number, String(calls), 30, 50)
-    place(caption, prefix + "LLM CALLS", 14, 15)
+    place(number, String(calls), 76, 40)
+    place(caption, prefix + "LLM CALLS", 16, 15)
     shownCalls = calls
     shownPrefix = prefix
   }
 
-  phase += 0.11
-  const breath = 0.5 + 0.5 * Math.sin(phase) // 0..1
-  const h = barH * (0.5 + 0.5 * breath)
-  bar.setFrame($.NSMakeRect(barX, 15 + (barH - h) / 2, 4, h))
-  bar.setAlphaValue(Math.min(1, 0.3 + 0.45 * breath + 0.5 * flash))
-  bar.layer.setBackgroundColor(blend(flash).CGColor)
-  number.setTextColor(blend(flash))
+  const target = calls / (calls + K)
+  displayFrac += (target - displayFrac) * 0.18 // ease the core toward its size
+  const s = Math.min(1, displayFrac + flash * 0.06) * D // little surge on a new call
+  disc.setFrame($.NSMakeRect(cx - s / 2, cy - s / 2, s, s))
+  disc.setCornerRadius(s / 2)
+  disc.setFillColor(rgb([lerp(G[0], 0.7, flash), lerp(G[1], 1, flash), lerp(G[2], 0.8, flash)], 1))
+  ring.setBorderColor(rgb(G, lerp(0.45, 1, flash)))
+  number.setTextColor(rgb([lerp(1, G[0], flash), lerp(1, G[1], flash), lerp(1, G[2], flash)], 1))
 
-  flash *= 0.86
+  flash *= 0.88
   if (flash < 0.02) flash = 0
 }
+
 win.makeKeyAndOrderFront(null)
 tick()
 
