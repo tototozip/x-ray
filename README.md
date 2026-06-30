@@ -7,11 +7,13 @@ npm install -g github:tototozip/x-ray
 xray
 ```
 
-By default it watches Codex and prints one live line:
+By default it opens a tiny floating macOS window and exits, so your terminal stays free:
 
 ```txt
 codex llm calls: 0
 ```
+
+The window stays alive after the launch terminal exits. Close the window to stop the counter.
 
 Supported adapters:
 
@@ -24,6 +26,12 @@ xray pii
 ```
 
 It is intentionally local-only. It reads the agent's own local session/event files and never proxies network traffic, reads API keys, or sends telemetry.
+
+Use terminal mode when you do not want a window:
+
+```sh
+xray --stdio
+```
 
 ## How It Counts
 

@@ -2,10 +2,13 @@
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 const home = os.homedir();
 const xdgData = process.env.XDG_DATA_HOME || path.join(home, ".local", "share");
+const xdgState = process.env.XDG_STATE_HOME || path.join(home, ".local", "state");
+const self = fileURLToPath(import.meta.url);
 
 const agents = {
   codex: {
@@ -33,18 +36,24 @@ agents.pii = agents.pi;
 
 const args = parseArgs(process.argv.slice(2));
 const agent = agents[args.agent];
-if (!agent) exit(`usage: xray [${Object.keys(agents).join("|")}] [--once] [--total] [--path PATH]`);
+if (!agent) exit(`usage: xray [${Object.keys(agents).join("|")}] [--stdio] [--once] [--total] [--path PATH]`);
 
-if (agent.sqlite) watchSqlite(agent, args);
+if (!args.once && !args.stdio && !args.daemon) launchWindow(args);
+
+if (args.daemon) runWindowDaemon(agent, args);
+else if (agent.sqlite) watchSqlite(agent, args);
 else watchJsonl(agent, args);
 
 function parseArgs(argv) {
-  const out = { agent: "codex", once: false, total: false, poll: 500, path: "" };
+  const out = { agent: "codex", once: false, total: false, stdio: false, daemon: false, poll: 500, path: "", state: "" };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--once") out.once = true;
     else if (a === "--total") out.total = true;
+    else if (a === "--stdio") out.stdio = true;
+    else if (a === "--daemon") out.daemon = true;
     else if (a === "--path") out.path = argv[++i] || "";
+    else if (a === "--state") out.state = argv[++i] || "";
     else if (a === "--poll") out.poll = Number(argv[++i] || out.poll);
     else if (!a.startsWith("-")) out.agent = a;
     else exit(`unknown option: ${a}`);
@@ -52,20 +61,49 @@ function parseArgs(argv) {
   return out;
 }
 
-function watchJsonl(agent, args) {
+function launchWindow(args) {
+  if (process.platform !== "darwin") exit("window mode currently requires macOS; use --stdio for terminal mode");
+  const state = expand(args.state || path.join(xdgState, "xray", `${args.agent}.json`));
+  fs.mkdirSync(path.dirname(state), { recursive: true });
+  writeState(state, args.agent, 0, { ready: false });
+
+  const childArgs = [self, args.agent, "--daemon", "--state", state, "--poll", String(args.poll)];
+  if (args.path) childArgs.push("--path", expand(args.path));
+  if (args.total) childArgs.push("--total");
+
+  const child = spawn(process.execPath, childArgs, { detached: true, stdio: "ignore" });
+  child.unref();
+  waitUntilReady(state);
+  console.log("xray window opened");
+  process.exit(0);
+}
+
+function runWindowDaemon(agent, args) {
+  const state = expand(args.state || path.join(xdgState, "xray", `${agent.label}.json`));
+  fs.mkdirSync(path.dirname(state), { recursive: true });
+  const script = path.join(path.dirname(self), "xray-window.jxa");
+  const window = spawn("osascript", ["-l", "JavaScript", script, state], { stdio: "ignore" });
+  window.on("exit", () => process.exit(0));
+  const output = (label, calls) => writeState(state, label, calls, { ready: true });
+
+  if (agent.sqlite) watchSqlite(agent, args, output);
+  else watchJsonl(agent, args, output);
+}
+
+function watchJsonl(agent, args, output = render) {
   let calls = 0;
   const seen = new Map();
   const roots = args.path ? [expand(args.path)] : agent.roots;
 
   scan(roots, seen, agent.match, args.once || args.total ? "all" : "end", (n) => (calls += n));
-  render(agent.label, calls, true);
+  output(agent.label, calls, true);
   if (args.once) return finish();
 
   const timer = setInterval(() => {
     scan(roots, seen, agent.match, "new", (n) => {
       if (n) {
         calls += n;
-        render(agent.label, calls);
+        output(agent.label, calls);
       }
     });
   }, Math.max(100, args.poll || 500));
@@ -75,18 +113,18 @@ function watchJsonl(agent, args) {
   });
 }
 
-function watchSqlite(agent, args) {
+function watchSqlite(agent, args, output = render) {
   const db = expand(args.path || agent.sqlite);
   const baseline = args.total || args.once ? 0 : queryOpencode(db);
   let calls = Math.max(0, queryOpencode(db) - baseline);
-  render(agent.label, calls, true);
+  output(agent.label, calls, true);
   if (args.once) return finish();
 
   const timer = setInterval(() => {
     const next = Math.max(0, queryOpencode(db) - baseline);
     if (next !== calls) {
       calls = next;
-      render(agent.label, calls);
+      output(agent.label, calls);
     }
   }, Math.max(500, args.poll || 1000));
   process.on("SIGINT", () => {
@@ -162,6 +200,22 @@ function render(label, calls, first = false) {
   const line = `${label} llm calls: ${calls}`;
   if (!process.stdout.isTTY) return (first || calls > 0) && console.log(line);
   process.stdout.write(`\r${line}`);
+}
+
+function writeState(file, label, calls, extra = {}) {
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify({ label, calls, updated: Date.now(), ...extra }));
+  fs.renameSync(tmp, file);
+}
+
+function waitUntilReady(file) {
+  const deadline = Date.now() + 2000;
+  while (Date.now() < deadline) {
+    try {
+      if (JSON.parse(fs.readFileSync(file, "utf8")).ready) return;
+    } catch {}
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+  }
 }
 
 function finish() {

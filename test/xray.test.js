@@ -43,7 +43,7 @@ test("updates live for multiple Codex LLM calls in one session file", async () =
   const file = path.join(dir, "live.jsonl");
   fs.writeFileSync(file, "");
 
-  const child = spawn(process.execPath, [bin, "codex", "--path", dir, "--poll", "100"], {
+  const child = spawn(process.execPath, [bin, "codex", "--stdio", "--path", dir, "--poll", "100"], {
     cwd: root,
     stdio: ["ignore", "pipe", "pipe"],
   });
