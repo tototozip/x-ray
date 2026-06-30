@@ -3,45 +3,84 @@ ObjC.import("Cocoa")
 const args = $.NSProcessInfo.processInfo.arguments
 const statePath = ObjC.unwrap(args.objectAtIndex(args.count - 1))
 const app = $.NSApplication.sharedApplication
-const width = 220
-const height = 70
+const width = 212
+const height = 110
 
-function readStateLabel() {
+function readState() {
   const text = $.NSString.stringWithContentsOfFileEncodingError(statePath, $.NSUTF8StringEncoding, null)
   if (!text) return null
-  const state = JSON.parse(ObjC.unwrap(text))
-  return `${state.label ? state.label + " " : ""}llm calls: ${state.calls}`
+  try {
+    return JSON.parse(ObjC.unwrap(text))
+  } catch (_) {
+    return null
+  }
 }
 
 app.setActivationPolicy($.NSApplicationActivationPolicyAccessory)
 
-const rect = $.NSMakeRect(80, 80, width, height)
+const screen = $.NSScreen.mainScreen.visibleFrame
+const rect = $.NSMakeRect(
+  screen.origin.x + screen.size.width - width - 24,
+  screen.origin.y + screen.size.height - height - 24,
+  width,
+  height,
+)
 const style = $.NSWindowStyleMaskTitled | $.NSWindowStyleMaskClosable | $.NSWindowStyleMaskNonactivatingPanel
 const win = $.NSPanel.alloc.initWithContentRectStyleMaskBackingDefer(rect, style, $.NSBackingStoreBuffered, false)
 
 win.setLevel($.NSFloatingWindowLevel)
-win.setCollectionBehavior($.NSWindowCollectionBehaviorCanJoinAllSpaces | $.NSWindowCollectionBehaviorFullScreenAuxiliary)
-win.setTitle("x-ray")
+win.setCollectionBehavior(
+  $.NSWindowCollectionBehaviorCanJoinAllSpaces | $.NSWindowCollectionBehaviorFullScreenAuxiliary,
+)
+win.setMovableByWindowBackground(true)
+win.setTitleVisibility($.NSWindowTitleHidden)
+win.setTitlebarAppearsTransparent(true)
+win.setAppearance($.NSAppearance.appearanceNamed($.NSAppearanceNameDarkAqua))
 win.setOpaque(false)
-win.setBackgroundColor($.NSColor.colorWithCalibratedWhiteAlpha(0.08, 0.92))
+win.setBackgroundColor($.NSColor.colorWithCalibratedWhiteAlpha(0.13, 1.0))
 
-const label = $.NSTextField.alloc.initWithFrame($.NSMakeRect(12, 19, width - 24, 30))
-label.setStringValue(readStateLabel() || "xray")
-label.setTextColor($.NSColor.whiteColor)
-label.setBezeled(false)
-label.setDrawsBackground(false)
-label.setEditable(false)
-label.setSelectable(false)
-label.setAlignment($.NSTextAlignmentCenter)
-label.setFont($.NSFont.monospacedDigitSystemFontOfSizeWeight(17, $.NSFontWeightSemibold))
-win.contentView.addSubview(label)
+const green = $.NSColor.colorWithCalibratedRedGreenBlueAlpha(0.36, 0.86, 0.52, 1.0)
+const dim = $.NSColor.colorWithCalibratedWhiteAlpha(0.55, 1.0)
+
+function label(y, font, color) {
+  const f = $.NSTextField.alloc.initWithFrame($.NSMakeRect(0, y, width, 20))
+  f.setBezeled(false)
+  f.setDrawsBackground(false)
+  f.setEditable(false)
+  f.setSelectable(false)
+  f.setFont(font)
+  f.setTextColor(color)
+  win.contentView.addSubview(f)
+  return f
+}
+
+const number = label(30, $.NSFont.monospacedDigitSystemFontOfSizeWeight(42, $.NSFontWeightBold), green)
+const caption = label(14, $.NSFont.systemFontOfSizeWeight(10.5, $.NSFontWeightSemibold), dim)
+
+// Center by measuring the text and sizing the field to it — robust regardless
+// of how NSTextField alignment resolves through JXA.
+function place(f, text, y, h) {
+  f.setStringValue(text)
+  const attrs = $.NSDictionary.dictionaryWithObjectForKey(f.font, $.NSFontAttributeName)
+  const w = Math.ceil($(text).sizeWithAttributes(attrs).width) + 4
+  f.setFrame($.NSMakeRect((width - w) / 2, y, w, h))
+}
+
+function render() {
+  const state = readState()
+  const calls = state && typeof state.calls === "number" ? state.calls : 0
+  const prefix = state && state.label ? String(state.label).toUpperCase() + " · " : ""
+  place(number, String(calls), 30, 50)
+  place(caption, prefix + "LLM CALLS", 14, 15)
+}
+render()
 
 win.makeKeyAndOrderFront(null)
 
 $.NSTimer.scheduledTimerWithTimeIntervalRepeatsBlock(0.25, true, () => {
   if (!win.isVisible) return app.terminate(null)
   try {
-    label.setStringValue(readStateLabel() || "xray")
+    render()
   } catch (_) {}
 })
 
