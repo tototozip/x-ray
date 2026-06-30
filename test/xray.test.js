@@ -7,104 +7,106 @@ import { spawnSync } from "node:child_process";
 
 process.env.XDG_STATE_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "xray-state-"));
 const {
-  buildCodexOtelBlock,
   countOtelCalls,
-  installCodexTelemetryConfig,
+  countResponseCreatedRows,
+  readMaxLogId,
+  readNewLogCalls,
+  responseCreatedId,
   withXrayOtelConfig,
 } = await import("../bin/xray.js");
 
-test("installs a single temporary Codex otel block", () => {
+test("extracts Codex response ids from websocket and SSE logs", () => {
+  assert.equal(
+    responseCreatedId('Received message {"type":"response.created","response":{"id":"resp_abc123","status":"in_progress"}}'),
+    "resp_abc123",
+  );
+  assert.equal(
+    responseCreatedId('SSE event: {"type":"response.created","response":{"id":"resp_def456","status":"in_progress"}}'),
+    "resp_def456",
+  );
+});
+
+test("ignores non-request response events and embedded command text", () => {
+  assert.equal(responseCreatedId('Received message {"type":"response.completed","response":{"id":"resp_abc123"}}'), null);
+  assert.equal(responseCreatedId('ToolCall: shell_command {"command":"echo response.created resp_fake"}'), null);
+});
+
+test("counts unique response.created rows", () => {
+  const seen = new Set();
+  const rows = [
+    row(1, 'Received message {"type":"response.created","response":{"id":"resp_one"}}'),
+    row(2, 'Received message {"type":"response.created","response":{"id":"resp_one"}}'),
+    row(3, 'SSE event: {"type":"response.created","response":{"id":"resp_two"}}'),
+  ];
+  assert.equal(countResponseCreatedRows(rows, seen), 2);
+  assert.equal(countResponseCreatedRows(rows, seen), 0);
+});
+
+test("counts only pre-existing process pids when requested", () => {
+  const rows = [
+    row(1, 'Received message {"type":"response.created","response":{"id":"resp_one"}}', "pid:111:aaa"),
+    row(2, 'Received message {"type":"response.created","response":{"id":"resp_two"}}', "pid:222:bbb"),
+  ];
+  assert.equal(countResponseCreatedRows(rows, new Set(), { allowedPids: new Set(["111"]) }), 1);
+});
+
+test("reads new Codex calls from sqlite logs", { skip: !commandExists("sqlite3") }, () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xray-db-"));
+  const db = path.join(dir, "logs_2.sqlite");
+  sqlite(db, "create table logs (id integer primary key autoincrement, process_uuid text, feedback_log_body text);");
+  sqlite(db, `insert into logs (process_uuid, feedback_log_body) values
+    ('pid:111:aaa', 'Received message {"type":"response.created","response":{"id":"resp_old"}}');`);
+
+  const baseline = readMaxLogId(db);
+  sqlite(db, `insert into logs (process_uuid, feedback_log_body) values
+    ('pid:111:aaa', 'Received message {"type":"response.created","response":{"id":"resp_new_one"}}'),
+    ('pid:111:aaa', 'SSE event: {"type":"response.created","response":{"id":"resp_new_two"}}'),
+    ('pid:111:aaa', 'Received message {"type":"response.completed","response":{"id":"resp_new_two"}}');`);
+
+  const seen = new Set();
+  const first = readNewLogCalls(db, baseline, seen);
+  assert.equal(first.calls, 2);
+  assert.equal(first.lastId, 4);
+
+  const second = readNewLogCalls(db, first.lastId, seen);
+  assert.equal(second.calls, 0);
+  assert.equal(second.lastId, 4);
+});
+
+test("counts Codex request OTLP log events", () => {
+  const payload = {
+    resourceLogs: [{ scopeLogs: [{ logRecords: [
+      otelRecord("codex.websocket_request"),
+      otelRecord("codex.api_request", { "http.route": "/responses" }),
+      otelRecord("codex.api_request", { "http.route": "/models" }),
+      otelRecord("codex.sse_event"),
+    ] }] }],
+  };
+  assert.equal(countOtelCalls(payload), 2);
+});
+
+test("replaces existing otel config with the xray exporter", () => {
   const config = `model = "gpt-5.5"
 
 [otel]
-enabled = false
-environment = "existing"
+exporter = "old"
 
 [projects."/tmp"]
 trust_level = "trusted"
 `;
-
-  const next = withXrayOtelConfig(config, 12345);
+  const next = withXrayOtelConfig(config, 1234);
   assert.equal((next.match(/\[otel\]/g) || []).length, 1);
-  assert.match(next, /endpoint = "http:\/\/127\.0\.0\.1:12345\/v1\/logs"/);
-  assert.doesNotMatch(next, /enabled = true/);
-  assert.doesNotMatch(next, /traces_exporter/);
+  assert.match(next, /127\.0\.0\.1:1234/);
+  assert.doesNotMatch(next, /old/);
   assert.match(next, /\[projects\."\/tmp"\]/);
-  assert.doesNotMatch(next, /environment = "existing"/);
 });
 
-test("restores Codex config exactly after the xray session", () => {
-  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "xray-codex-"));
-  const configPath = path.join(codexHome, "config.toml");
-  const original = `model = "gpt-5.5"
-
-[projects."/repo"]
-trust_level = "trusted"
-`;
-  fs.writeFileSync(configPath, original, { mode: 0o600 });
-
-  const restore = installCodexTelemetryConfig(54321, { codexHome });
-  assert.notEqual(fs.readFileSync(configPath, "utf8"), original);
-  restore();
-  assert.equal(fs.readFileSync(configPath, "utf8"), original);
-});
-
-test("counts Codex API and websocket request logs", () => {
-  const payload = logsPayload([
-    logRecord("codex.api_request"),
-    logRecord("codex.websocket_request"),
-    logRecord("codex.websocket.request"),
-    logRecord("codex.sse_event"),
-  ]);
-  assert.equal(countOtelCalls(payload), 3);
-});
-
-test("does not count model list API telemetry as an LLM call", () => {
-  const payload = logsPayload([
-    logRecord("codex.api_request", { "http.route": "/models" }),
-    logRecord("codex.api_request", {}, "GET /models Request completed"),
-    logRecord("codex.api_request", { "http.route": "/responses" }),
-  ]);
-  assert.equal(countOtelCalls(payload), 1);
-});
-
-test("uses metric deltas only when no request logs are present", () => {
-  const metricState = new Map();
-  const first = metricsPayload("codex.websocket.request.duration_ms", 3, 2);
-  const second = metricsPayload("codex.websocket.request.duration_ms", 5, 2);
-
-  assert.equal(countOtelCalls(first, { metricState }), 3);
-  assert.equal(countOtelCalls(second, { metricState }), 2);
-  assert.equal(countOtelCalls(logsPayload([logRecord("codex.websocket.request")]), { metricState }), 1);
-});
-
-test("installed Codex exec accepts the generated otel config", { skip: !commandExists("codex") }, () => {
-  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "xray-codex-"));
-  fs.writeFileSync(path.join(codexHome, "config.toml"), withXrayOtelConfig("", 1), { mode: 0o600 });
-  const result = spawnSync("codex", ["exec", "--strict-config", "--ephemeral", "-s", "read-only", "test"], {
-    cwd: process.cwd(),
-    encoding: "utf8",
-    env: { ...process.env, CODEX_HOME: codexHome, OPENAI_API_KEY: "", CODEX_API_KEY: "" },
-    timeout: 3_000,
-  });
-
-  assert.doesNotMatch(result.stderr, /unknown configuration field|Error loading config/, result.stderr);
-});
-
-test("generated Codex otel block contains only strict-safe fields", () => {
-  assert.equal(buildCodexOtelBlock(1234), `# >>> xray codex telemetry >>>
-[otel]
-exporter = { otlp-http = { endpoint = "http://127.0.0.1:1234/v1/logs", protocol = "json" } }
-# <<< xray codex telemetry <<<`);
-});
-
-function logsPayload(records) {
-  return { resourceLogs: [{ scopeLogs: [{ logRecords: records }] }] };
+function row(id, feedback_log_body, process_uuid = null) {
+  return { id, feedback_log_body, process_uuid };
 }
 
-function logRecord(name, attrs = {}, body = "Request completed") {
+function otelRecord(name, attrs = {}) {
   return {
-    body: { stringValue: body },
     attributes: [
       { key: "event.name", value: { stringValue: name } },
       ...Object.entries(attrs).map(([key, value]) => ({ key, value: { stringValue: value } })),
@@ -112,26 +114,11 @@ function logRecord(name, attrs = {}, body = "Request completed") {
   };
 }
 
-function metricsPayload(name, count, temporality) {
-  return {
-    resourceMetrics: [{
-      scopeMetrics: [{
-        metrics: [{
-          name,
-          histogram: {
-            aggregationTemporality: temporality,
-            dataPoints: [{
-              startTimeUnixNano: "1",
-              attributes: [{ key: "transport", value: { stringValue: "websocket" } }],
-              count,
-            }],
-          },
-        }],
-      }],
-    }],
-  };
+function sqlite(db, sql) {
+  const result = spawnSync("sqlite3", [db, sql], { encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
 }
 
 function commandExists(command) {
-  return spawnSync("sh", ["-c", `command -v ${command}`]).status === 0;
+  return spawnSync("sh", ["-c", `command -v ${command}`], { stdio: "ignore" }).status === 0;
 }

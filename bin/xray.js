@@ -3,16 +3,15 @@ import http from "node:http";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const home = os.homedir();
 const stateDir = path.join(process.env.XDG_STATE_HOME || path.join(home, ".local", "state"), "xray");
 const self = fileURLToPath(import.meta.url);
-
 const beginMarker = "# >>> xray codex telemetry >>>";
 const endMarker = "# <<< xray codex telemetry <<<";
-const countedEvents = new Set(["codex.api_request", "codex.websocket_request", "codex.websocket.request"]);
+const countedOtelEvents = new Set(["codex.api_request", "codex.websocket_request", "codex.websocket.request"]);
 
 if (isMain()) main();
 
@@ -29,33 +28,44 @@ function main() {
   if (argv[0] === "-h" || argv[0] === "--help") {
     return exit("usage: xray\n\nCounts Codex LLM calls until you press Ctrl-C or close the window.", 0);
   }
-  if (argv.length) return exit("xray now runs as one global Codex counter: run `xray` with no arguments.");
+  if (argv.length) return exit("xray runs as one Codex counter: run `xray` with no arguments.");
+  if (!commandExists("sqlite3")) return exit("xray needs sqlite3 to read Codex's local log database.");
 
   fs.mkdirSync(stateDir, { recursive: true });
   const statePath = path.join(stateDir, "codex.json");
+  const codexHome = process.env.CODEX_HOME || path.join(home, ".codex");
+  const dbs = codexLogDbPaths(codexHome);
+  const cursors = new Map(dbs.map((db) => [db, readMaxLogId(db)]));
+  const seenResponses = new Set();
+  const alreadyRunning = baselineCodexPids();
+
   let calls = 0;
-  writeState(statePath, calls, "starting");
+  let stopped = false;
+  writeState(statePath, calls, "counting");
 
-  const metricState = new Map();
-  const collector = startOtelCollector({
-    onCalls(n) {
-      calls += n;
-      writeState(statePath, calls, "counting");
-    },
-    metricState,
-  });
+  const addCalls = (n) => {
+    if (!n) return;
+    calls += n;
+    writeState(statePath, calls, "counting");
+  };
 
+  const collector = startOtelCollector({ onCalls: addCalls });
   collector.listen(0, "127.0.0.1", () => {
-    const { port } = collector.address();
-    const endpoint = `http://127.0.0.1:${port}`;
     let restoreConfig;
     let window;
-    let stopped = false;
-
+    let timer;
     try {
-      restoreConfig = installCodexTelemetryConfig(port);
-      writeState(statePath, calls, "counting");
+      restoreConfig = installCodexTelemetryConfig(collector.address().port, { codexHome });
       window = openWindow(statePath);
+      timer = setInterval(() => {
+        let added = 0;
+        for (const db of dbs) {
+          const result = readNewLogCalls(db, cursors.get(db) || 0, seenResponses, { allowedPids: alreadyRunning });
+          cursors.set(db, result.lastId);
+          added += result.calls;
+        }
+        addCalls(added);
+      }, 500);
       console.log("xray: counting Codex LLM calls. Press Ctrl-C or close the window to stop.");
     } catch (e) {
       collector.close();
@@ -65,9 +75,10 @@ function main() {
     const stop = (code = 0) => {
       if (stopped) return;
       stopped = true;
-      writeState(statePath, calls, "stopping");
+      clearInterval(timer);
       try { restoreConfig?.(); } catch (e) { console.error(`xray restore warning: ${e.message}`); }
       try { collector.close(); } catch {}
+      writeState(statePath, calls, "stopped");
       kill(window);
       process.exit(code);
     };
@@ -81,20 +92,93 @@ function main() {
     });
     window?.on("exit", () => stop(0));
     process.stdin.resume();
-
-    // Keep the endpoint visible in verbose shells without making it part of
-    // the product surface.
-    if (process.env.XRAY_DEBUG) console.error(`xray OTLP endpoint: ${endpoint}`);
   });
-
   collector.on("error", (e) => exit(`xray failed to listen on 127.0.0.1: ${e.message}`));
 }
 
 const kill = (p) => { try { p?.kill(); } catch {} };
 
-// ---- Codex OpenTelemetry collector ----
+export function codexLogDbPaths(codexHome) {
+  return [
+    path.join(codexHome, "logs_2.sqlite"),
+    path.join(codexHome, "sqlite", "logs_2.sqlite"),
+  ];
+}
 
-function startOtelCollector({ onCalls, metricState = new Map() }) {
+export function readMaxLogId(dbPath) {
+  if (!fs.existsSync(dbPath)) return 0;
+  const out = sqlite(dbPath, "select coalesce(max(id), 0) as id from logs;");
+  try {
+    return Number(JSON.parse(out)[0]?.id || 0);
+  } catch {
+    return 0;
+  }
+}
+
+export function readNewLogCalls(dbPath, afterId, seenResponses = new Set(), options = {}) {
+  if (!fs.existsSync(dbPath)) return { calls: 0, lastId: afterId };
+  const safeAfter = Number.isFinite(Number(afterId)) ? Number(afterId) : 0;
+  const sql = `
+select id,
+  process_uuid,
+  case
+    when feedback_log_body like 'Received message {"type":"response.created"%'
+      or feedback_log_body like 'SSE event: {"type":"response.created"%'
+    then feedback_log_body
+    else ''
+  end as feedback_log_body
+from logs
+where id > ${safeAfter}
+order by id asc
+limit 1000;
+`;
+  const out = sqlite(dbPath, sql);
+  let rows = [];
+  try {
+    rows = JSON.parse(out || "[]");
+  } catch {
+    return { calls: 0, lastId: safeAfter };
+  }
+  const counted = countResponseCreatedRows(rows, seenResponses, options);
+  const lastId = rows.length ? Number(rows.at(-1).id) : safeAfter;
+  return { calls: counted, lastId };
+}
+
+export function countResponseCreatedRows(rows, seenResponses = new Set(), { allowedPids = null } = {}) {
+  let calls = 0;
+  for (const row of rows) {
+    if (allowedPids?.size && !processUuidMatchesPid(row.process_uuid, allowedPids)) continue;
+    const body = String(row.feedback_log_body || "");
+    const responseId = responseCreatedId(body);
+    if (!responseId || seenResponses.has(responseId)) continue;
+    seenResponses.add(responseId);
+    calls += 1;
+  }
+  return calls;
+}
+
+function processUuidMatchesPid(processUuid, pids) {
+  const pid = String(processUuid || "").match(/^pid:(\d+):/)?.[1];
+  return !!pid && pids.has(pid);
+}
+
+export function responseCreatedId(body) {
+  if (!/^(?:Received message|SSE event:)\s*\{"type":"response\.created"/.test(body)) return null;
+  return body.match(/"response"\s*:\s*\{\s*"id"\s*:\s*"(resp_[^"]+)"/)?.[1] || null;
+}
+
+function sqlite(dbPath, sql) {
+  const result = spawnSync("sqlite3", ["-json", dbPath, sql], {
+    encoding: "utf8",
+    maxBuffer: 20 * 1024 * 1024,
+  });
+  if (result.status !== 0) return "[]";
+  return result.stdout.trim() || "[]";
+}
+
+// ---- Codex OpenTelemetry collector for Codex processes started after xray ----
+
+function startOtelCollector({ onCalls }) {
   return http.createServer((req, res) => {
     if (req.method !== "POST") return res.writeHead(405).end();
 
@@ -103,14 +187,10 @@ function startOtelCollector({ onCalls, metricState = new Map() }) {
     req.on("end", () => {
       let calls = 0;
       try {
-        const body = Buffer.concat(chunks).toString("utf8");
-        const payload = body ? JSON.parse(body) : {};
-        calls = countOtelCalls(payload, { metricState });
-      } catch {
-        // Codex is configured to send JSON. If that changes, do not break Codex;
-        // just accept the export and keep counting from future parseable data.
-      }
-      if (calls) onCalls(calls);
+        const payload = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+        calls = countOtelCalls(payload);
+      } catch {}
+      onCalls(calls);
       res.writeHead(200, { "content-type": "application/json" });
       res.end("{}");
     });
@@ -118,70 +198,24 @@ function startOtelCollector({ onCalls, metricState = new Map() }) {
   });
 }
 
-export function countOtelCalls(payload, { metricState = new Map() } = {}) {
-  const logCalls = countLogCalls(payload);
-  if (logCalls) return logCalls;
-  return countMetricCalls(payload, metricState);
-}
-
-function countLogCalls(payload) {
+export function countOtelCalls(payload) {
   let calls = 0;
-  for (const record of walkLogRecords(payload)) {
-    const attrs = attributesToObject(record.attributes);
-    const name = attrs["event.name"] || bodyString(record.body);
-    if (!countedEvents.has(name)) continue;
-    if (name === "codex.api_request" && isNonInferenceApiRequest(attrs, record)) continue;
-    calls += 1;
-  }
-  return calls;
-}
-
-function* walkLogRecords(payload) {
   for (const resource of payload?.resourceLogs || []) {
     for (const scope of resource.scopeLogs || []) {
-      for (const record of scope.logRecords || []) yield record;
-    }
-  }
-}
-
-function countMetricCalls(payload, metricState) {
-  let calls = 0;
-  for (const metric of walkMetrics(payload)) {
-    if (!["codex.api_request.duration_ms", "codex.websocket.request.duration_ms"].includes(metric.name)) continue;
-    const points = metric.histogram?.dataPoints || metric.sum?.dataPoints || [];
-    const temporality = metric.histogram?.aggregationTemporality ?? metric.sum?.aggregationTemporality;
-    for (const point of points) {
-      const attrs = attributesToObject(point.attributes);
-      if (metric.name === "codex.api_request.duration_ms" && isNonInferenceApiRequest(attrs, point)) continue;
-      const value = Number(point.count ?? point.asInt ?? point.asDouble ?? 0);
-      if (!Number.isFinite(value) || value <= 0) continue;
-      if (temporality === 1) {
-        calls += value;
-        continue;
+      for (const record of scope.logRecords || []) {
+        const attrs = attributesToObject(record.attributes);
+        const name = attrs["event.name"];
+        if (!countedOtelEvents.has(name)) continue;
+        if (name === "codex.api_request" && isNonInferenceApiRequest(attrs)) continue;
+        calls += 1;
       }
-      const key = `${metric.name}:${JSON.stringify(attrs)}:${point.startTimeUnixNano || ""}`;
-      const prior = metricState.get(key) || 0;
-      metricState.set(key, value);
-      calls += value >= prior ? value - prior : value;
     }
   }
   return calls;
 }
 
-function* walkMetrics(payload) {
-  for (const resource of payload?.resourceMetrics || []) {
-    for (const scope of resource.scopeMetrics || []) {
-      for (const metric of scope.metrics || []) yield metric;
-    }
-  }
-}
-
-function isNonInferenceApiRequest(attrs, record) {
-  const haystack = [
-    bodyString(record?.body),
-    ...Object.entries(attrs).flatMap(([k, v]) => [k, v]),
-  ].map(String).join("\n");
-  return /\/models(\?|$|[\s"'])/.test(haystack);
+function isNonInferenceApiRequest(attrs) {
+  return Object.values(attrs).some((value) => /\/models(\?|$|[\s"'])/.test(String(value)));
 }
 
 function attributesToObject(attrs = []) {
@@ -196,54 +230,27 @@ function otelValue(value) {
   if ("intValue" in value) return value.intValue;
   if ("doubleValue" in value) return value.doubleValue;
   if ("boolValue" in value) return value.boolValue;
-  if ("arrayValue" in value) return value.arrayValue?.values?.map(otelValue) || [];
-  if ("kvlistValue" in value) return attributesToObject(value.kvlistValue?.values || []);
   return value;
 }
 
-function bodyString(body) {
-  const v = otelValue(body);
-  return typeof v === "string" ? v : "";
-}
-
-// ---- Codex config patching ----
+// ---- Temporary Codex config for future Codex processes ----
 
 export function installCodexTelemetryConfig(port, { codexHome = process.env.CODEX_HOME || path.join(home, ".codex") } = {}) {
   const configPath = path.join(codexHome, "config.toml");
   fs.mkdirSync(codexHome, { recursive: true });
-
   const original = readFileIfExists(configPath);
-  const originalMode = fileMode(configPath);
-  const next = withXrayOtelConfig(original, port);
-  atomicWrite(configPath, next, originalMode);
-
-  return () => restoreCodexTelemetryConfig(configPath, original, originalMode);
+  const mode = fileMode(configPath);
+  atomicWrite(configPath, withXrayOtelConfig(original, port), mode);
+  return () => atomicWrite(configPath, original, mode);
 }
 
 export function withXrayOtelConfig(config, port) {
-  const clean = stripManagedBlock(config);
-  const withoutOtel = removeTopLevelTables(clean, "otel").trimEnd();
-  const block = buildCodexOtelBlock(port);
-  return `${withoutOtel}${withoutOtel ? "\n\n" : ""}${block}\n`;
-}
-
-function restoreCodexTelemetryConfig(configPath, original, mode) {
-  const current = readFileIfExists(configPath);
-  const restored = stripManagedBlock(current).trim();
-  const finalContent = original;
-  if (!restored && !finalContent) {
-    try { fs.unlinkSync(configPath); } catch {}
-    return;
-  }
-  atomicWrite(configPath, finalContent, mode);
-}
-
-export function buildCodexOtelBlock(port) {
-  const base = `http://127.0.0.1:${port}`;
-  return `${beginMarker}
+  const clean = removeTopLevelTables(stripManagedBlock(config), "otel").trimEnd();
+  return `${clean}${clean ? "\n\n" : ""}${beginMarker}
 [otel]
-exporter = { otlp-http = { endpoint = "${base}/v1/logs", protocol = "json" } }
-${endMarker}`;
+exporter = { otlp-http = { endpoint = "http://127.0.0.1:${port}/v1/logs", protocol = "json" } }
+${endMarker}
+`;
 }
 
 function stripManagedBlock(config) {
@@ -251,21 +258,14 @@ function stripManagedBlock(config) {
 }
 
 function removeTopLevelTables(config, name) {
-  const lines = config.split("\n");
   const kept = [];
   let dropping = false;
-  for (const line of lines) {
-    const table = parseTableHeader(line);
-    if (table) dropping = table[0] === name;
+  for (const line of config.split("\n")) {
+    const table = line.match(/^\s*\[([^\[\]]+)\]\s*(?:#.*)?$/)?.[1]?.split(".")[0]?.replace(/^"|"$/g, "");
+    if (table) dropping = table === name;
     if (!dropping) kept.push(line);
   }
   return kept.join("\n");
-}
-
-function parseTableHeader(line) {
-  const m = line.match(/^\s*\[([^\[\]]+)\]\s*(?:#.*)?$/);
-  if (!m) return null;
-  return m[1].split(".").map((part) => part.trim().replace(/^"|"$/g, ""));
 }
 
 function readFileIfExists(file) {
@@ -285,7 +285,21 @@ function atomicWrite(file, content, mode = 0o600) {
 
 const escapeRegExp = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-// ---- window ----
+export function baselineCodexPids() {
+  const result = spawnSync("ps", ["-axo", "pid=,command="], { encoding: "utf8", maxBuffer: 5 * 1024 * 1024 });
+  if (result.status !== 0) return new Set();
+  const pids = new Set();
+  for (const line of result.stdout.split("\n")) {
+    if (!/(^|\/| )codex( |$)|\/Codex(\.app| |\/)/i.test(line)) continue;
+    const pid = line.trim().match(/^(\d+)/)?.[1];
+    if (pid) pids.add(pid);
+  }
+  return pids;
+}
+
+function commandExists(command) {
+  return spawnSync("sh", ["-c", `command -v ${command}`], { stdio: "ignore" }).status === 0;
+}
 
 function openWindow(statePath) {
   if (process.platform !== "darwin") return null;
