@@ -69,6 +69,7 @@ function parseArgs(argv) {
 function launchWindow(args) {
   if (process.platform !== "darwin") exit("window mode currently requires macOS; use --stdio for terminal mode");
   const state = expand(args.state || path.join(xdgState, "xray", `${args.agent}.json`));
+  stopExisting(state);
   fs.mkdirSync(path.dirname(state), { recursive: true });
   writeState(state, args.agent, 0, { ready: false });
 
@@ -236,6 +237,19 @@ function waitUntilReady(file) {
       if (JSON.parse(fs.readFileSync(file, "utf8")).ready) return;
     } catch {}
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+  }
+}
+
+function stopExisting(state) {
+  const ps = spawnSync("ps", ["-axo", "pid=,command="], { encoding: "utf8" });
+  if (ps.status !== 0) return;
+  for (const line of ps.stdout.split("\n")) {
+    if (!line.includes(state) || !line.includes("xray")) continue;
+    const pid = Number(line.trim().split(/\s+/, 1)[0]);
+    if (!pid || pid === process.pid || pid === process.ppid) continue;
+    try {
+      process.kill(pid, "SIGTERM");
+    } catch {}
   }
 }
 
