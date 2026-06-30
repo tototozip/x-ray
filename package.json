@@ -1,0 +1,22 @@
+{
+  "name": "@tototozip/x-ray",
+  "version": "0.1.0",
+  "description": "Minimal live LLM call counter for coding agents.",
+  "type": "module",
+  "bin": {
+    "xray": "./bin/xray.js"
+  },
+  "scripts": {
+    "test": "node --test",
+    "pack:test": "npm pack --dry-run"
+  },
+  "files": [
+    "bin",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT"
+}
