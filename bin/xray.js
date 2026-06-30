@@ -42,16 +42,14 @@ function main() {
     const { port } = proxy.address();
     const window = openWindow(statePath);
     const child = spawn(command, argv.slice(1), { stdio: "inherit", env: childEnv(port, certs) });
-    child.on("error", (e) => {
-      shutdown(window, proxy);
-      exit(`failed to launch ${command}: ${e.message}`);
-    });
-    child.on("exit", (code) => {
-      shutdown(window, proxy);
-      process.exit(code ?? 0);
-    });
+    process.on("SIGINT", () => {}); // the agent owns Ctrl-C; we exit when it does
+    process.on("exit", () => { kill(child); kill(window); }); // never leak the agent or window
+    child.on("error", (e) => exit(`failed to launch ${command}: ${e.message}`));
+    child.on("exit", (code) => process.exit(code ?? 0));
   });
 }
+
+const kill = (p) => { try { p?.kill(); } catch {} };
 
 function childEnv(port, certs) {
   const url = `http://127.0.0.1:${port}`;
@@ -122,11 +120,6 @@ function openWindow(statePath) {
   return spawn("osascript", ["-l", "JavaScript", script, statePath], { stdio: "ignore" });
 }
 
-function shutdown(window, proxy) {
-  try { window?.kill(); } catch {}
-  try { proxy?.close(); } catch {}
-}
-
 // ---- certificates ----
 
 // A local CA + one leaf covering the intercepted hosts, plus a bundle that
@@ -173,7 +166,6 @@ function openssl(args) {
 // ---- state file (read by xray-window.jxa) ----
 
 function writeState(file, label, calls) {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.${process.pid}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify({ label, calls, updated: Date.now() }));
   fs.renameSync(tmp, file);
