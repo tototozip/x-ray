@@ -38,18 +38,11 @@ win.contentView.addSubview(label)
 
 win.makeKeyAndOrderFront(null)
 
-while (win.isVisible) {
+$.NSTimer.scheduledTimerWithTimeIntervalRepeatsBlock(0.25, true, () => {
+  if (!win.isVisible) return app.terminate(null)
   try {
     label.setStringValue(readStateLabel() || "xray")
-    label.setNeedsDisplay(true)
-    win.contentView.setNeedsDisplay(true)
   } catch (_) {}
+})
 
-  const until = $.NSDate.dateWithTimeIntervalSinceNow(0.25)
-  while (true) {
-    const event = app.nextEventMatchingMaskUntilDateInModeDequeue($.NSEventMaskAny, until, $.NSDefaultRunLoopMode, true)
-    if (!event) break
-    app.sendEvent(event)
-  }
-  app.updateWindows()
-}
+app.run()
