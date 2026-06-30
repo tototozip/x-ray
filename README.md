@@ -4,21 +4,30 @@ Minimal, exact live LLM-call counter for coding agents.
 
 ```sh
 npm install -g github:tototozip/x-ray
-xray codex
-xray claude
+xray
 ```
 
-`xray` runs your agent through a tiny local proxy and shows a floating macOS
-window that ticks up the instant the agent calls the model:
+Run `xray`. A floating macOS window pops up, and you land in a normal shell —
+use `codex`, `claude`, or any agent as you always would. The window ticks up
+the instant any of them calls the model:
 
 ```txt
-codex llm calls: 6
+llm calls: 6
 ```
 
-Anything after the agent name is passed straight through, so `xray codex` (or
-`xray codex exec ...`, `xray claude -p ...`) behaves exactly like running the
-agent itself — there's just a live counter beside it. Close the window or quit
-the agent to stop.
+Close the window or `exit` the shell to stop.
+
+To count just one agent for a single run, name it (anything after passes
+straight through):
+
+```sh
+xray codex            # -> "codex llm calls: N"
+xray claude -p "..."
+```
+
+The catch: counting happens by routing the agent through `xray`, so the agent
+has to run **inside** the `xray` shell (or be launched as `xray <agent>`). A
+`codex` you start in some other terminal isn't counted.
 
 ## How it counts
 

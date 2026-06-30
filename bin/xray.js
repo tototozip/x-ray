@@ -27,21 +27,24 @@ if (process.argv[1] === self) main();
 
 function main() {
   const argv = process.argv.slice(2);
-  if (!argv.length || argv[0] === "-h" || argv[0] === "--help") {
-    return exit(`usage: xray <${Object.keys(AGENTS).join("|")}|command> [args...]`, 0);
+  if (argv[0] === "-h" || argv[0] === "--help") {
+    return exit("usage: xray [agent|command...]\n  xray         count every LLM call in a fresh shell\n  xray codex   count a single agent", 0);
   }
-  const name = argv[0];
-  const command = AGENTS[name] || name;
+  // With no arguments, wrap an interactive shell so every agent run inside it
+  // is counted; otherwise wrap the given agent/command directly.
+  const wrap = argv.length ? argv : [process.env.SHELL || "/bin/zsh", "-i"];
+  const command = AGENTS[wrap[0]] || wrap[0];
+  const label = AGENTS[wrap[0]] ? wrap[0] : "";
   const certs = ensureCerts();
-  const statePath = path.join(stateDir, `${name}.json`);
-  writeState(statePath, name, 0);
+  const statePath = path.join(stateDir, `${label || "session"}.json`);
+  writeState(statePath, label, 0);
 
   let calls = 0;
-  const proxy = startProxy(certs, () => writeState(statePath, name, ++calls));
+  const proxy = startProxy(certs, () => writeState(statePath, label, ++calls));
   proxy.listen(0, "127.0.0.1", () => {
     const { port } = proxy.address();
     const window = openWindow(statePath);
-    const child = spawn(command, argv.slice(1), { stdio: "inherit", env: childEnv(port, certs) });
+    const child = spawn(command, wrap.slice(1), { stdio: "inherit", env: childEnv(port, certs) });
     process.on("SIGINT", () => {}); // the agent owns Ctrl-C; we exit when it does
     process.on("exit", () => { kill(child); kill(window); }); // never leak the agent or window
     child.on("error", (e) => exit(`failed to launch ${command}: ${e.message}`));

@@ -10,7 +10,7 @@ function readStateLabel() {
   const text = $.NSString.stringWithContentsOfFileEncodingError(statePath, $.NSUTF8StringEncoding, null)
   if (!text) return null
   const state = JSON.parse(ObjC.unwrap(text))
-  return `${state.label} llm calls: ${state.calls}`
+  return `${state.label ? state.label + " " : ""}llm calls: ${state.calls}`
 }
 
 app.setActivationPolicy($.NSApplicationActivationPolicyAccessory)
