@@ -13,25 +13,6 @@ function readStateLabel() {
   return `${state.label} llm calls: ${state.calls}`
 }
 
-ObjC.registerSubclass({
-  name: "XRayTick",
-  methods: {
-    "tick:": {
-      types: ["void", ["id"]],
-      implementation: function () {
-        if (!win.isVisible()) {
-          app.terminate(null)
-          return
-        }
-        try {
-          const text = readStateLabel()
-          if (text) label.setStringValue(text)
-        } catch (_) {}
-      },
-    },
-  },
-})
-
 app.setActivationPolicy($.NSApplicationActivationPolicyAccessory)
 
 const rect = $.NSMakeRect(80, 80, width, height)
@@ -55,8 +36,20 @@ label.setAlignment($.NSTextAlignmentCenter)
 label.setFont($.NSFont.monospacedDigitSystemFontOfSizeWeight(17, $.NSFontWeightSemibold))
 win.contentView.addSubview(label)
 
-const target = $.XRayTick.alloc.init
-$.NSTimer.scheduledTimerWithTimeIntervalTargetSelectorUserInfoRepeats(0.25, target, "tick:", null, true)
-
 win.makeKeyAndOrderFront(null)
-app.run()
+
+while (win.isVisible) {
+  try {
+    label.setStringValue(readStateLabel() || "xray")
+    label.setNeedsDisplay(true)
+    win.contentView.setNeedsDisplay(true)
+  } catch (_) {}
+
+  const until = $.NSDate.dateWithTimeIntervalSinceNow(0.25)
+  while (true) {
+    const event = app.nextEventMatchingMaskUntilDateInModeDequeue($.NSEventMaskAny, until, $.NSDefaultRunLoopMode, true)
+    if (!event) break
+    app.sendEvent(event)
+  }
+  app.updateWindows()
+}
