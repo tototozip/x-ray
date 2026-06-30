@@ -11,8 +11,9 @@ const stateDir = path.join(process.env.XDG_STATE_HOME || path.join(home, ".local
 const self = fileURLToPath(import.meta.url);
 const beginMarker = "# >>> xray codex telemetry >>>";
 const endMarker = "# <<< xray codex telemetry <<<";
-const countedOtelEvents = new Set(["codex.api_request", "codex.websocket_request", "codex.websocket.request"]);
+const countedOtelEvents = new Set(["codex.websocket_request", "codex.websocket.request"]);
 const codexBundleId = "com.openai.codex";
+const requestDedupeWindowMs = 1000;
 
 if (isMain()) main();
 
@@ -87,6 +88,7 @@ const kill = (p) => { try { p?.kill(); } catch {} };
 // ---- Codex OpenTelemetry collector ----
 
 function startOtelCollector({ onCalls }) {
+  const seenRequests = new Map();
   return http.createServer((req, res) => {
     if (req.method !== "POST") return res.writeHead(405).end();
 
@@ -96,7 +98,7 @@ function startOtelCollector({ onCalls }) {
       let calls = 0;
       try {
         const payload = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
-        calls = countOtelCalls(payload);
+        calls = countOtelCalls(payload, { seenRequests });
       } catch {}
       onCalls(calls);
       res.writeHead(200, { "content-type": "application/json" });
@@ -106,7 +108,7 @@ function startOtelCollector({ onCalls }) {
   });
 }
 
-export function countOtelCalls(payload) {
+export function countOtelCalls(payload, { seenRequests = new Map() } = {}) {
   let calls = 0;
   for (const resource of payload?.resourceLogs || []) {
     for (const scope of resource.scopeLogs || []) {
@@ -114,7 +116,7 @@ export function countOtelCalls(payload) {
         const attrs = attributesToObject(record.attributes);
         const name = attrs["event.name"];
         if (!countedOtelEvents.has(name)) continue;
-        if (name === "codex.api_request" && isNonInferenceApiRequest(attrs)) continue;
+        if (seenRecently(record, attrs, seenRequests)) continue;
         calls += 1;
       }
     }
@@ -122,8 +124,39 @@ export function countOtelCalls(payload) {
   return calls;
 }
 
-function isNonInferenceApiRequest(attrs) {
-  return Object.values(attrs).some((value) => /\/models(\?|$|[\s"'])/.test(String(value)));
+function seenRecently(record, attrs, seenRequests) {
+  const key = requestKey(attrs);
+  if (!key) return false;
+
+  const timestamp = requestTimestamp(record, attrs);
+  for (const [seenKey, seenAt] of seenRequests) {
+    if (timestamp - seenAt > requestDedupeWindowMs) seenRequests.delete(seenKey);
+  }
+
+  const previous = seenRequests.get(key);
+  seenRequests.set(key, timestamp);
+  return previous !== undefined && Math.abs(timestamp - previous) <= requestDedupeWindowMs;
+}
+
+function requestKey(attrs) {
+  const conversation = attrs["conversation.id"];
+  if (!conversation) return null;
+  return [
+    "codex.websocket_request",
+    conversation,
+    attrs.model || "",
+    attrs.slug || "",
+  ].join("|");
+}
+
+function requestTimestamp(record, attrs) {
+  const eventMs = Date.parse(attrs["event.timestamp"] || "");
+  if (Number.isFinite(eventMs)) return eventMs;
+
+  const observed = Number(record.observedTimeUnixNano || record.timeUnixNano || 0);
+  if (Number.isFinite(observed) && observed > 0) return Math.round(observed / 1_000_000);
+
+  return Date.now();
 }
 
 function attributesToObject(attrs = []) {

@@ -24,7 +24,9 @@ Codex config before exiting.
 LLM service:
 
 - It temporarily points Codex's OpenTelemetry exporter at a local receiver and
-  counts Codex request events as they arrive.
+  counts each outbound Codex Responses websocket request as it arrives.
+- It deduplicates repeated telemetry records for the same request, so one model
+  request increments the counter once.
 - If the Codex desktop app is already open, `xray` relaunches it once after
   installing that temporary endpoint. This makes the app pick up live counting
   instead of falling back to delayed local logs.
@@ -33,6 +35,10 @@ LLM service:
 
 This is intentionally Codex-only. It avoids macOS system proxy settings, local
 certificate trust, per-terminal wrapping, and log-database polling.
+
+A single visible user message can still produce more than one count when Codex
+does background LLM work, such as generating the thread title. Those are counted
+because they are also outbound model requests from your machine.
 
 ## Requirements
 

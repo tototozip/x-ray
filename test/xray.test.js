@@ -20,6 +20,54 @@ test("counts Codex request OTLP log events", () => {
       otelRecord("codex.sse_event"),
     ] }] }],
   };
+  assert.equal(countOtelCalls(payload), 1);
+});
+
+test("counts one call for each outbound websocket model request", () => {
+  const payload = {
+    resourceLogs: [{ scopeLogs: [{ logRecords: [
+      otelRecord("codex.websocket_request", { "api.path": "responses", "conversation.id": "one" }),
+      otelRecord("codex.api_request", { "api.path": "responses" }),
+      otelRecord("codex.websocket.request", { "api.path": "responses", "conversation.id": "two" }),
+      otelRecord("codex.api_request", { "api.path": "responses" }),
+    ] }] }],
+  };
+  assert.equal(countOtelCalls(payload), 2);
+});
+
+test("dedupes repeated websocket telemetry for the same request", () => {
+  const payload = {
+    resourceLogs: [{ scopeLogs: [{ logRecords: [
+      otelRecord("codex.websocket_request", {
+        "conversation.id": "same",
+        "event.timestamp": "2026-06-30T16:23:58.318Z",
+        model: "gpt-5.5",
+      }),
+      otelRecord("codex.websocket_request", {
+        "conversation.id": "same",
+        "event.timestamp": "2026-06-30T16:23:58.877Z",
+        model: "gpt-5.5",
+      }),
+    ] }] }],
+  };
+  assert.equal(countOtelCalls(payload), 1);
+});
+
+test("keeps separate websocket requests outside the duplicate window", () => {
+  const payload = {
+    resourceLogs: [{ scopeLogs: [{ logRecords: [
+      otelRecord("codex.websocket_request", {
+        "conversation.id": "same",
+        "event.timestamp": "2026-06-30T16:23:58.000Z",
+        model: "gpt-5.5",
+      }),
+      otelRecord("codex.websocket_request", {
+        "conversation.id": "same",
+        "event.timestamp": "2026-06-30T16:24:01.000Z",
+        model: "gpt-5.5",
+      }),
+    ] }] }],
+  };
   assert.equal(countOtelCalls(payload), 2);
 });
 
