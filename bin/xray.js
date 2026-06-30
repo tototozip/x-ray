@@ -11,7 +11,7 @@ const stateDir = path.join(process.env.XDG_STATE_HOME || path.join(home, ".local
 const self = fileURLToPath(import.meta.url);
 const beginMarker = "# >>> xray codex telemetry >>>";
 const endMarker = "# <<< xray codex telemetry <<<";
-const countedOtelEvents = new Set(["codex.websocket_request", "codex.websocket.request"]);
+const websocketRequestEvents = new Set(["codex.websocket_request", "codex.websocket.request"]);
 const codexBundleId = "com.openai.codex";
 const requestDedupeWindowMs = 1000;
 
@@ -115,13 +115,23 @@ export function countOtelCalls(payload, { seenRequests = new Map() } = {}) {
       for (const record of scope.logRecords || []) {
         const attrs = attributesToObject(record.attributes);
         const name = attrs["event.name"];
-        if (!countedOtelEvents.has(name)) continue;
+        if (!isLlmRequestEvent(name, attrs)) continue;
         if (seenRecently(record, attrs, seenRequests)) continue;
         calls += 1;
       }
     }
   }
   return calls;
+}
+
+function isLlmRequestEvent(name, attrs) {
+  if (websocketRequestEvents.has(name)) return true;
+  if (name === "codex.api_request") return isInferenceApiRequest(attrs);
+  return false;
+}
+
+function isInferenceApiRequest(attrs) {
+  return endpointKind(attrs) !== null;
 }
 
 function seenRecently(record, attrs, seenRequests) {
@@ -142,11 +152,44 @@ function requestKey(attrs) {
   const conversation = attrs["conversation.id"];
   if (!conversation) return null;
   return [
-    "codex.websocket_request",
+    "codex.llm_request",
     conversation,
+    endpointKind(attrs) || "responses",
     attrs.model || "",
     attrs.slug || "",
   ].join("|");
+}
+
+function endpointKind(attrs) {
+  const candidates = [
+    attrs.endpoint,
+    attrs["api.path"],
+    attrs["http.route"],
+    attrs["http.target"],
+    attrs["url.path"],
+    attrs.path,
+    attrs.url,
+    attrs["http.url"],
+  ];
+  for (const value of candidates) {
+    const kind = endpointKindFromValue(value);
+    if (kind) return kind;
+  }
+  return null;
+}
+
+function endpointKindFromValue(value) {
+  if (value == null) return null;
+  let text = String(value).trim().toLowerCase();
+  if (!text) return null;
+  try {
+    text = new URL(text).pathname;
+  } catch {}
+  text = text.split("?", 1)[0].replace(/^\/+/, "");
+  if (text.startsWith("v1/")) text = text.slice(3);
+  if (text === "responses" || text.startsWith("responses/")) return "responses";
+  if (text === "chat/completions" || text.startsWith("chat/completions/")) return "chat_completions";
+  return null;
 }
 
 function requestTimestamp(record, attrs) {

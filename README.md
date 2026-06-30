@@ -24,7 +24,7 @@ Codex config before exiting.
 LLM service:
 
 - It temporarily points Codex's OpenTelemetry exporter at a local receiver and
-  counts each outbound Codex Responses websocket request as it arrives.
+  counts each outbound Codex LLM request as it arrives.
 - It deduplicates repeated telemetry records for the same request, so one model
   request increments the counter once.
 - If the Codex desktop app is already open, `xray` relaunches it once after
@@ -39,6 +39,10 @@ certificate trust, per-terminal wrapping, and log-database polling.
 A single visible user message can still produce more than one count when Codex
 does background LLM work, such as generating the thread title. Those are counted
 because they are also outbound model requests from your machine.
+
+Tool events are not counted separately because they are not LLM requests. If the
+model returns JSON or asks Codex to run a shell/Python command, that output is
+part of the already-counted model request.
 
 ## Requirements
 

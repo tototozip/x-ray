@@ -14,8 +14,8 @@ const {
 test("counts Codex request OTLP log events", () => {
   const payload = {
     resourceLogs: [{ scopeLogs: [{ logRecords: [
-      otelRecord("codex.websocket_request"),
-      otelRecord("codex.api_request", { "http.route": "/responses" }),
+      otelRecord("codex.websocket_request", { "conversation.id": "one", model: "gpt-5.5" }),
+      otelRecord("codex.api_request", { "http.route": "/responses", "conversation.id": "one", model: "gpt-5.5" }),
       otelRecord("codex.api_request", { "http.route": "/models" }),
       otelRecord("codex.sse_event"),
     ] }] }],
@@ -26,13 +26,46 @@ test("counts Codex request OTLP log events", () => {
 test("counts one call for each outbound websocket model request", () => {
   const payload = {
     resourceLogs: [{ scopeLogs: [{ logRecords: [
-      otelRecord("codex.websocket_request", { "api.path": "responses", "conversation.id": "one" }),
-      otelRecord("codex.api_request", { "api.path": "responses" }),
-      otelRecord("codex.websocket.request", { "api.path": "responses", "conversation.id": "two" }),
-      otelRecord("codex.api_request", { "api.path": "responses" }),
+      otelRecord("codex.websocket_request", { "api.path": "responses", "conversation.id": "one", model: "gpt-5.5" }),
+      otelRecord("codex.api_request", { "api.path": "responses", "conversation.id": "one", model: "gpt-5.5" }),
+      otelRecord("codex.websocket.request", { "api.path": "responses", "conversation.id": "two", model: "gpt-5.5" }),
+      otelRecord("codex.api_request", { "api.path": "responses", "conversation.id": "two", model: "gpt-5.5" }),
     ] }] }],
   };
   assert.equal(countOtelCalls(payload), 2);
+});
+
+test("counts HTTP Responses API request telemetry when it is the LLM call signal", () => {
+  const payload = {
+    resourceLogs: [{ scopeLogs: [{ logRecords: [
+      otelRecord("codex.api_request", {
+        endpoint: "/responses",
+        "conversation.id": "api-only",
+        model: "gpt-5.5",
+      }),
+      otelRecord("codex.api_request", { endpoint: "/models" }),
+    ] }] }],
+  };
+  assert.equal(countOtelCalls(payload), 1);
+});
+
+test("dedupes API and websocket telemetry for the same LLM request", () => {
+  const payload = {
+    resourceLogs: [{ scopeLogs: [{ logRecords: [
+      otelRecord("codex.api_request", {
+        endpoint: "/responses",
+        "conversation.id": "same",
+        "event.timestamp": "2026-06-30T16:23:58.100Z",
+        model: "gpt-5.5",
+      }),
+      otelRecord("codex.websocket_request", {
+        "conversation.id": "same",
+        "event.timestamp": "2026-06-30T16:23:58.300Z",
+        model: "gpt-5.5",
+      }),
+    ] }] }],
+  };
+  assert.equal(countOtelCalls(payload), 1);
 });
 
 test("dedupes repeated websocket telemetry for the same request", () => {
@@ -76,6 +109,7 @@ test("ignores OTLP records that are not Codex request events", () => {
     resourceLogs: [{ scopeLogs: [{ logRecords: [
       otelRecord("codex.sse_event"),
       otelRecord("codex.exec_command_begin"),
+      otelRecord("codex.tool_call"),
       { attributes: [] },
     ] }] }],
   };
