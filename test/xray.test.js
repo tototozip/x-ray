@@ -3,75 +3,13 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
 
 process.env.XDG_STATE_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "xray-state-"));
 const {
   countOtelCalls,
-  countResponseCreatedRows,
-  readMaxLogId,
-  readNewLogCalls,
-  responseCreatedId,
+  relaunchRunningCodexApp,
   withXrayOtelConfig,
 } = await import("../bin/xray.js");
-
-test("extracts Codex response ids from websocket and SSE logs", () => {
-  assert.equal(
-    responseCreatedId('Received message {"type":"response.created","response":{"id":"resp_abc123","status":"in_progress"}}'),
-    "resp_abc123",
-  );
-  assert.equal(
-    responseCreatedId('SSE event: {"type":"response.created","response":{"id":"resp_def456","status":"in_progress"}}'),
-    "resp_def456",
-  );
-});
-
-test("ignores non-request response events and embedded command text", () => {
-  assert.equal(responseCreatedId('Received message {"type":"response.completed","response":{"id":"resp_abc123"}}'), null);
-  assert.equal(responseCreatedId('ToolCall: shell_command {"command":"echo response.created resp_fake"}'), null);
-});
-
-test("counts unique response.created rows", () => {
-  const seen = new Set();
-  const rows = [
-    row(1, 'Received message {"type":"response.created","response":{"id":"resp_one"}}'),
-    row(2, 'Received message {"type":"response.created","response":{"id":"resp_one"}}'),
-    row(3, 'SSE event: {"type":"response.created","response":{"id":"resp_two"}}'),
-  ];
-  assert.equal(countResponseCreatedRows(rows, seen), 2);
-  assert.equal(countResponseCreatedRows(rows, seen), 0);
-});
-
-test("counts only pre-existing process pids when requested", () => {
-  const rows = [
-    row(1, 'Received message {"type":"response.created","response":{"id":"resp_one"}}', "pid:111:aaa"),
-    row(2, 'Received message {"type":"response.created","response":{"id":"resp_two"}}', "pid:222:bbb"),
-  ];
-  assert.equal(countResponseCreatedRows(rows, new Set(), { allowedPids: new Set(["111"]) }), 1);
-});
-
-test("reads new Codex calls from sqlite logs", { skip: !commandExists("sqlite3") }, () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "xray-db-"));
-  const db = path.join(dir, "logs_2.sqlite");
-  sqlite(db, "create table logs (id integer primary key autoincrement, process_uuid text, feedback_log_body text);");
-  sqlite(db, `insert into logs (process_uuid, feedback_log_body) values
-    ('pid:111:aaa', 'Received message {"type":"response.created","response":{"id":"resp_old"}}');`);
-
-  const baseline = readMaxLogId(db);
-  sqlite(db, `insert into logs (process_uuid, feedback_log_body) values
-    ('pid:111:aaa', 'Received message {"type":"response.created","response":{"id":"resp_new_one"}}'),
-    ('pid:111:aaa', 'SSE event: {"type":"response.created","response":{"id":"resp_new_two"}}'),
-    ('pid:111:aaa', 'Received message {"type":"response.completed","response":{"id":"resp_new_two"}}');`);
-
-  const seen = new Set();
-  const first = readNewLogCalls(db, baseline, seen);
-  assert.equal(first.calls, 2);
-  assert.equal(first.lastId, 4);
-
-  const second = readNewLogCalls(db, first.lastId, seen);
-  assert.equal(second.calls, 0);
-  assert.equal(second.lastId, 4);
-});
 
 test("counts Codex request OTLP log events", () => {
   const payload = {
@@ -83,6 +21,17 @@ test("counts Codex request OTLP log events", () => {
     ] }] }],
   };
   assert.equal(countOtelCalls(payload), 2);
+});
+
+test("ignores OTLP records that are not Codex request events", () => {
+  const payload = {
+    resourceLogs: [{ scopeLogs: [{ logRecords: [
+      otelRecord("codex.sse_event"),
+      otelRecord("codex.exec_command_begin"),
+      { attributes: [] },
+    ] }] }],
+  };
+  assert.equal(countOtelCalls(payload), 0);
 });
 
 test("replaces existing otel config with the xray exporter", () => {
@@ -101,9 +50,28 @@ trust_level = "trusted"
   assert.match(next, /\[projects\."\/tmp"\]/);
 });
 
-function row(id, feedback_log_body, process_uuid = null) {
-  return { id, feedback_log_body, process_uuid };
-}
+test("does not relaunch Codex app when disabled or off macOS", () => {
+  assert.equal(relaunchRunningCodexApp({ shouldRelaunch: false, platform: "darwin" }), false);
+  assert.equal(relaunchRunningCodexApp({ shouldRelaunch: true, platform: "linux" }), false);
+});
+
+test("relaunches an already-running Codex app", () => {
+  const commands = [];
+  let running = true;
+  const relaunched = relaunchRunningCodexApp({
+    platform: "darwin",
+    isRunning: () => running,
+    runCommand: (command, args) => {
+      commands.push([command, ...args]);
+      if (command === "osascript") running = false;
+    },
+    wait: (done) => done(),
+    log: () => {},
+  });
+
+  assert.equal(relaunched, true);
+  assert.deepEqual(commands.map(([command]) => command), ["osascript", "open"]);
+});
 
 function otelRecord(name, attrs = {}) {
   return {
@@ -112,13 +80,4 @@ function otelRecord(name, attrs = {}) {
       ...Object.entries(attrs).map(([key, value]) => ({ key, value: { stringValue: value } })),
     ],
   };
-}
-
-function sqlite(db, sql) {
-  const result = spawnSync("sqlite3", [db, sql], { encoding: "utf8" });
-  assert.equal(result.status, 0, result.stderr);
-}
-
-function commandExists(command) {
-  return spawnSync("sh", ["-c", `command -v ${command}`], { stdio: "ignore" }).status === 0;
 }

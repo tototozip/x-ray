@@ -20,20 +20,21 @@ Codex config before exiting.
 
 ## How it counts
 
-`xray` uses Codex-local signals instead of intercepting network traffic:
+`xray` counts live Codex request events at the point Codex sends work toward the
+LLM service:
 
-- For Codex processes already running when `xray` starts, it reads the local
-  Codex `logs_2.sqlite` database in read-only polling mode and counts new
-  `response.created` events by unique response id.
-- For Codex processes started after `xray`, it temporarily points Codex's
-  OpenTelemetry exporter at a local receiver and counts request events.
+- It temporarily points Codex's OpenTelemetry exporter at a local receiver and
+  counts Codex request events as they arrive.
+- If the Codex desktop app is already open, `xray` relaunches it once after
+  installing that temporary endpoint. This makes the app pick up live counting
+  instead of falling back to delayed local logs.
 - It does not modify Codex config, app-server state, certificates, or macOS proxy
   settings permanently. On exit, it restores the original Codex config.
 
 This is intentionally Codex-only. It avoids macOS system proxy settings, local
-certificate trust, per-terminal wrapping, and app restarts.
+certificate trust, per-terminal wrapping, and log-database polling.
 
 ## Requirements
 
-macOS, Node >= 20, Codex installed, and `sqlite3` available. The floating window
-uses the built-in `osascript`.
+macOS, Node >= 20, and Codex installed. The floating window and app relaunch use
+the built-in `osascript`.
