@@ -19,6 +19,7 @@ Supported adapters:
 
 ```sh
 xray codex
+xray claude
 xray opencode
 xray openclaw
 xray pi
@@ -37,6 +38,7 @@ xray --stdio
 
 - It counts model inference calls, not user prompts or agent tasks. One user request can increment the counter many times.
 - Codex: counts new `event_msg` / `token_count` rows in `~/.codex/sessions`.
+- Claude Code: counts new assistant JSONL messages with non-zero `usage` in `~/.claude/projects`.
 - opencode: counts new `session.next.step.ended` rows in the local SQLite DB.
 - OpenClaw: counts new assistant JSONL messages with non-zero `usage`.
 - Pi/PII: counts new assistant JSONL messages with non-zero `usage`.

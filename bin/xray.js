@@ -16,6 +16,11 @@ const agents = {
     roots: [path.join(home, ".codex", "sessions")],
     match: (o) => o?.type === "event_msg" && o?.payload?.type === "token_count",
   },
+  claude: {
+    label: "claude",
+    roots: [path.join(home, ".claude", "projects")],
+    match: (o) => isAssistantUsage(o?.message) || isAssistantUsage(o),
+  },
   openclaw: {
     label: "openclaw",
     roots: [path.join(home, ".openclaw", "agents")],
@@ -139,22 +144,28 @@ function scan(roots, seen, match, mode, add) {
     if (!stat) continue;
     const previous = seen.get(file);
     const start = mode === "all" ? 0 : mode === "end" ? stat.size : previous === undefined ? 0 : Math.min(previous, stat.size);
-    seen.set(file, stat.size);
-    if (start >= stat.size) continue;
-    add(countFile(file, start, match));
+    if (start >= stat.size) {
+      seen.set(file, stat.size);
+      continue;
+    }
+    const result = countFile(file, start, match, mode === "all");
+    seen.set(file, result.offset);
+    add(result.count);
   }
 }
 
-function countFile(file, start, match) {
+function countFile(file, start, match, includeTrailing = false) {
   const text = fs.readFileSync(file, "utf8").slice(start);
+  const lastNewline = Math.max(text.lastIndexOf("\n"), text.lastIndexOf("\r"));
+  const completeText = includeTrailing || lastNewline === text.length - 1 ? text : text.slice(0, lastNewline + 1);
   let count = 0;
-  for (const line of text.split(/\r?\n/)) {
+  for (const line of completeText.split(/\r?\n/)) {
     if (!line.trim()) continue;
     try {
       if (match(JSON.parse(line))) count++;
     } catch {}
   }
-  return count;
+  return { count, offset: start + Buffer.byteLength(completeText) };
 }
 
 function listJsonl(roots) {
@@ -178,7 +189,17 @@ function isAssistantUsage(message) {
 }
 
 function usageTotal(usage) {
-  const flat = ["totalTokens", "total_tokens", "input", "output", "input_tokens", "output_tokens", "reasoning"];
+  const flat = [
+    "totalTokens",
+    "total_tokens",
+    "input",
+    "output",
+    "input_tokens",
+    "output_tokens",
+    "reasoning",
+    "cache_creation_input_tokens",
+    "cache_read_input_tokens",
+  ];
   return flat.reduce((sum, key) => sum + number(usage[key]), 0) + number(usage.cache?.read) + number(usage.cache?.write);
 }
 
