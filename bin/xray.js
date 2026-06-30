@@ -82,30 +82,42 @@ function startProxy(certs, onCall) {
   const cert = fs.readFileSync(certs.leafCert);
   const intercept = new Set(HOSTS);
 
+  // A peer resetting a connection must never take down the wrapped session.
+  const ignore = new Set(["ECONNRESET", "EPIPE", "ECONNABORTED", "ERR_STREAM_DESTROYED"]);
+  process.on("uncaughtException", (e) => { if (!ignore.has(e?.code)) throw e; });
+  const quiet = (s) => s.on("error", () => {});
+
   const inner = http.createServer((creq, cres) => {
     const host = (creq.headers.host || "").split(":")[0];
     if (isCall(creq.method, creq.url)) onCall();
     const up = https.request(
       { host, port: 443, method: creq.method, path: creq.url, headers: creq.headers },
       (ures) => {
+        ures.on("error", () => cres.destroy());
         cres.writeHead(ures.statusCode, ures.headers);
         ures.pipe(cres);
       },
     );
     up.on("error", () => cres.destroy());
+    creq.on("error", () => up.destroy());
     creq.pipe(up);
   });
   // Refuse websocket upgrades so the agent falls back to the countable HTTPS path.
   inner.on("upgrade", (_req, sock) => {
+    quiet(sock);
     sock.end("HTTP/1.1 426 Upgrade Required\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
   });
 
-  const tlsServer = tls.createServer({ key, cert, ALPNProtocols: ["http/1.1"] }, (s) =>
-    inner.emit("connection", s),
-  );
+  const tlsServer = tls.createServer({ key, cert, ALPNProtocols: ["http/1.1"] }, (s) => {
+    quiet(s);
+    inner.emit("connection", s);
+  });
+  tlsServer.on("tlsClientError", () => {});
 
   const proxy = http.createServer((_req, res) => res.writeHead(405).end());
+  proxy.on("clientError", () => {});
   proxy.on("connect", (req, client, head) => {
+    quiet(client);
     const [host, port] = req.url.split(":");
     if (intercept.has(host)) {
       client.write("HTTP/1.1 200 Connection Established\r\n\r\n");
@@ -119,7 +131,6 @@ function startProxy(certs, onCall) {
         up.pipe(client);
       });
       up.on("error", () => client.destroy());
-      client.on("error", () => up.destroy());
     }
   });
   return proxy;
