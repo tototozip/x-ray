@@ -39,7 +39,11 @@ win.setAppearance($.NSAppearance.appearanceNamed($.NSAppearanceNameDarkAqua))
 win.setOpaque(false)
 win.setBackgroundColor($.NSColor.colorWithCalibratedWhiteAlpha(0.13, 1.0))
 
-const green = $.NSColor.colorWithCalibratedRedGreenBlueAlpha(0.36, 0.86, 0.52, 1.0)
+const G = [0.36, 0.86, 0.52] // accent green
+function rgb(c, a) {
+  return $.NSColor.colorWithCalibratedRedGreenBlueAlpha(c[0], c[1], c[2], a)
+}
+const green = rgb(G, 1)
 const dim = $.NSColor.colorWithCalibratedWhiteAlpha(0.55, 1.0)
 
 function label(y, font, color) {
@@ -66,21 +70,56 @@ function place(f, text, y, h) {
   f.setFrame($.NSMakeRect((width - w) / 2, y, w, h))
 }
 
-function render() {
+// A glowing accent bar on the right edge that breathes, and flares when a call
+// lands — catches the eye from the corner of the screen.
+const barX = width - 11
+const barH = height - 30
+const bar = $.NSView.alloc.initWithFrame($.NSMakeRect(barX, 15, 4, barH))
+bar.setWantsLayer(true)
+bar.layer.setCornerRadius(2)
+bar.layer.setBackgroundColor(green.CGColor)
+bar.layer.setShadowColor(green.CGColor)
+bar.layer.setShadowRadius(5)
+bar.layer.setShadowOpacity(0.9)
+win.contentView.addSubview(bar)
+
+const blend = (lift) => rgb([G[0] + (1 - G[0]) * lift, G[1] + (1 - G[1]) * lift, G[2] + (1 - G[2]) * lift], 1)
+
+let shownCalls = null
+let shownPrefix = null
+let phase = 0
+let flash = 0 // 1 on a new call, decays each frame
+
+function tick() {
+  if (!win.isVisible) return app.terminate(null)
   const state = readState()
   const calls = state && typeof state.calls === "number" ? state.calls : 0
   const prefix = state && state.label ? String(state.label).toUpperCase() + " · " : ""
-  place(number, String(calls), 30, 50)
-  place(caption, prefix + "LLM CALLS", 14, 15)
+  if (calls !== shownCalls || prefix !== shownPrefix) {
+    if (shownCalls !== null && calls > shownCalls) flash = 1
+    place(number, String(calls), 30, 50)
+    place(caption, prefix + "LLM CALLS", 14, 15)
+    shownCalls = calls
+    shownPrefix = prefix
+  }
+
+  phase += 0.11
+  const breath = 0.5 + 0.5 * Math.sin(phase) // 0..1
+  const h = barH * (0.5 + 0.5 * breath)
+  bar.setFrame($.NSMakeRect(barX, 15 + (barH - h) / 2, 4, h))
+  bar.setAlphaValue(Math.min(1, 0.3 + 0.45 * breath + 0.5 * flash))
+  bar.layer.setBackgroundColor(blend(flash).CGColor)
+  number.setTextColor(blend(flash))
+
+  flash *= 0.86
+  if (flash < 0.02) flash = 0
 }
-render()
-
 win.makeKeyAndOrderFront(null)
+tick()
 
-$.NSTimer.scheduledTimerWithTimeIntervalRepeatsBlock(0.25, true, () => {
-  if (!win.isVisible) return app.terminate(null)
+$.NSTimer.scheduledTimerWithTimeIntervalRepeatsBlock(0.033, true, () => {
   try {
-    render()
+    tick()
   } catch (_) {}
 })
 
