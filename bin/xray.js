@@ -23,7 +23,17 @@ const AGENTS = { codex: "codex", claude: "claude" };
 export const isCall = (method, p) =>
   method === "POST" && /\/(responses|chat\/completions|messages)(\?|$)/.test(p);
 
-if (process.argv[1] === self) main();
+// Run as a CLI when executed directly. npm installs the global binary as a
+// symlink, so resolve it before comparing (otherwise main() never fires).
+if (isMain()) main();
+
+function isMain() {
+  try {
+    return process.argv[1] && fs.realpathSync(process.argv[1]) === self;
+  } catch {
+    return false;
+  }
+}
 
 function main() {
   const argv = process.argv.slice(2);
