@@ -56,11 +56,12 @@ function main() {
     const { port } = proxy.address();
     const window = openWindow(statePath);
     captureSystemProxy();
-    setSystemProxy(port); // route GUI apps (agent apps, browser, ...) through xray too
+    setSystemProxy(port); // GUI apps that honor the system proxy (e.g. browsers)
+    setGuiEnv(port, certs); // GUI apps whose engine honors only env vars (e.g. the Codex app)
     const child = spawn(command, wrap.slice(1), { stdio: "inherit", env: childEnv(port, certs) });
     process.on("SIGINT", () => {}); // the agent owns Ctrl-C; we exit when it does
     for (const sig of ["SIGTERM", "SIGHUP"]) process.on(sig, () => process.exit(0)); // always reach the revert
-    process.on("exit", () => { restoreSystemProxy(); kill(child); kill(window); }); // revert & don't leak
+    process.on("exit", () => { restoreSystemProxy(); unsetGuiEnv(); kill(child); kill(window); }); // revert & don't leak
     child.on("error", (e) => exit(`failed to launch ${command}: ${e.message}`));
     child.on("exit", (code) => process.exit(code ?? 0));
   });
@@ -191,6 +192,23 @@ function restoreSystemProxy() {
       spawnSync("networksetup", ["-setsecurewebproxystate", p.svc, "off"]);
     }
   }
+}
+
+// GUI apps launched after this inherit the proxy env, so an agent app's engine
+// (e.g. the Codex app's Rust core, which ignores the system proxy) routes
+// through xray. Relaunch the app after starting xray to pick it up.
+const GUI_ENV = { HTTP_PROXY: 1, HTTPS_PROXY: 1, ALL_PROXY: 1, NODE_EXTRA_CA_CERTS: 1, SSL_CERT_FILE: 1 };
+
+function setGuiEnv(port, certs) {
+  if (process.platform !== "darwin") return;
+  const url = `http://127.0.0.1:${port}`;
+  const val = { HTTP_PROXY: url, HTTPS_PROXY: url, ALL_PROXY: url, NODE_EXTRA_CA_CERTS: certs.ca, SSL_CERT_FILE: certs.bundle };
+  for (const k of Object.keys(GUI_ENV)) spawnSync("launchctl", ["setenv", k, val[k]]);
+}
+
+function unsetGuiEnv() {
+  if (process.platform !== "darwin") return;
+  for (const k of Object.keys(GUI_ENV)) spawnSync("launchctl", ["unsetenv", k]);
 }
 
 // Trust our CA so apps don't error on the intercepted hosts. One-time; prompts.
