@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import fs from "node:fs";
-import path from "node:path";
 import os from "node:os";
+import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
@@ -14,47 +14,45 @@ const agents = {
   codex: {
     label: "codex",
     roots: [path.join(home, ".codex", "sessions")],
-    match: (o) => o?.type === "event_msg" && o?.payload?.type === "token_count",
+    match: (row) => row?.type === "event_msg" && row?.payload?.type === "token_count",
   },
   claude: {
     label: "claude",
     roots: [path.join(home, ".claude", "projects")],
-    match: (o) => isAssistantUsage(o?.message) || isAssistantUsage(o),
+    match: usageRow,
   },
   openclaw: {
     label: "openclaw",
     roots: [path.join(home, ".openclaw", "agents")],
-    match: (o) => isAssistantUsage(o?.message) || isAssistantUsage(o),
+    match: usageRow,
   },
   pi: {
     label: "pi",
     roots: [path.join(home, ".pi", "agent", "sessions"), path.join(home, ".pi", "agent")],
-    match: (o) => isAssistantUsage(o?.message) || isAssistantUsage(o),
+    match: usageRow,
   },
   pii: null,
   opencode: {
     label: "opencode",
-    sqlite: opencodeDb(),
+    db: opencodeDb(),
   },
 };
 agents.pii = agents.pi;
 
 const args = parseArgs(process.argv.slice(2));
 const agent = agents[args.agent];
-if (!agent) exit(`usage: xray [${Object.keys(agents).join("|")}] [--stdio] [--once] [--total] [--path PATH]`);
+if (!agent) exit(`usage: xray [${Object.keys(agents).join("|")}] [--stdio] [--once] [--path PATH]`);
 
 if (!args.once && !args.stdio && !args.daemon) launchWindow(args);
 
-if (args.daemon) runWindowDaemon(agent, args);
-else if (agent.sqlite) watchSqlite(agent, args);
-else watchJsonl(agent, args);
+if (args.daemon) runDaemon(agent, args);
+else runCounter(agent, args, render);
 
 function parseArgs(argv) {
-  const out = { agent: "codex", once: false, total: false, stdio: false, daemon: false, poll: 500, path: "", state: "" };
+  const out = { agent: "codex", once: false, stdio: false, daemon: false, poll: 500, path: "", state: "" };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--once") out.once = true;
-    else if (a === "--total") out.total = true;
     else if (a === "--stdio") out.stdio = true;
     else if (a === "--daemon") out.daemon = true;
     else if (a === "--path") out.path = argv[++i] || "";
@@ -75,7 +73,6 @@ function launchWindow(args) {
 
   const childArgs = [self, args.agent, "--daemon", "--state", state, "--poll", String(args.poll)];
   if (args.path) childArgs.push("--path", expand(args.path));
-  if (args.total) childArgs.push("--total");
 
   const child = spawn(process.execPath, childArgs, { detached: true, stdio: "ignore" });
   child.unref();
@@ -84,29 +81,31 @@ function launchWindow(args) {
   process.exit(0);
 }
 
-function runWindowDaemon(agent, args) {
+function runDaemon(agent, args) {
   const state = expand(args.state || path.join(xdgState, "xray", `${agent.label}.json`));
   fs.mkdirSync(path.dirname(state), { recursive: true });
   const script = path.join(path.dirname(self), "xray-window.jxa");
   const window = spawn("osascript", ["-l", "JavaScript", script, state], { stdio: "ignore" });
   window.on("exit", () => process.exit(0));
-  const output = (label, calls) => writeState(state, label, calls, { ready: true });
-
-  if (agent.sqlite) watchSqlite(agent, args, output);
-  else watchJsonl(agent, args, output);
+  runCounter(agent, args, (label, calls) => writeState(state, label, calls, { ready: true }));
 }
 
-function watchJsonl(agent, args, output = render) {
+function runCounter(agent, args, output) {
+  if (agent.db) return watchDb(agent, args, output);
+  return watchJsonl(agent, args, output);
+}
+
+function watchJsonl(agent, args, output) {
   let calls = 0;
   const seen = new Map();
   const roots = args.path ? [expand(args.path)] : agent.roots;
 
-  scan(roots, seen, agent.match, args.once || args.total ? "all" : "end", (n) => (calls += n));
+  scanJsonl(roots, seen, agent.match, { initial: true, all: args.once }, (n) => (calls += n));
   output(agent.label, calls, true);
-  if (args.once) return finish();
+  if (args.once) return;
 
   const timer = setInterval(() => {
-    scan(roots, seen, agent.match, "new", (n) => {
+    scanJsonl(roots, seen, agent.match, { initial: false, all: false }, (n) => {
       if (n) {
         calls += n;
         output(agent.label, calls);
@@ -115,16 +114,16 @@ function watchJsonl(agent, args, output = render) {
   }, Math.max(100, args.poll || 500));
   process.on("SIGINT", () => {
     clearInterval(timer);
-    finish();
+    if (process.stdout.isTTY) process.stdout.write("\n");
   });
 }
 
-function watchSqlite(agent, args, output = render) {
-  const db = expand(args.path || agent.sqlite);
-  const baseline = args.total || args.once ? 0 : queryOpencode(db);
+function watchDb(agent, args, output) {
+  const db = expand(args.path || agent.db);
+  const baseline = args.once ? 0 : queryOpencode(db);
   let calls = Math.max(0, queryOpencode(db) - baseline);
   output(agent.label, calls, true);
-  if (args.once) return finish();
+  if (args.once) return;
 
   const timer = setInterval(() => {
     const next = Math.max(0, queryOpencode(db) - baseline);
@@ -135,28 +134,28 @@ function watchSqlite(agent, args, output = render) {
   }, Math.max(500, args.poll || 1000));
   process.on("SIGINT", () => {
     clearInterval(timer);
-    finish();
+    if (process.stdout.isTTY) process.stdout.write("\n");
   });
 }
 
-function scan(roots, seen, match, mode, add) {
+function scanJsonl(roots, seen, match, opts, add) {
   for (const file of listJsonl(roots)) {
     const stat = safeStat(file);
     if (!stat) continue;
     const previous = seen.get(file);
-    const start = mode === "all" ? 0 : mode === "end" ? stat.size : previous === undefined ? 0 : Math.min(previous, stat.size);
+    const start = opts.all ? 0 : previous === undefined ? (opts.initial ? stat.size : 0) : Math.min(previous, stat.size);
     if (start >= stat.size) {
       seen.set(file, stat.size);
       continue;
     }
-    const result = countFile(file, start, match, mode === "all");
+    const result = countJsonl(file, start, match, opts.all);
     seen.set(file, result.offset);
     add(result.count);
   }
 }
 
-function countFile(file, start, match, includeTrailing = false) {
-  const text = fs.readFileSync(file, "utf8").slice(start);
+function countJsonl(file, start, match, includeTrailing = false) {
+  const text = fs.readFileSync(file).subarray(start).toString("utf8");
   const lastNewline = Math.max(text.lastIndexOf("\n"), text.lastIndexOf("\r"));
   const completeText = includeTrailing || lastNewline === text.length - 1 ? text : text.slice(0, lastNewline + 1);
   let count = 0;
@@ -183,8 +182,12 @@ function collect(target, out) {
   for (const entry of safeReaddir(target)) collect(path.join(target, entry.name), out);
 }
 
-function isAssistantUsage(message) {
-  if (!message || message.role !== "assistant") return false;
+function usageRow(row) {
+  return hasUsage(row?.message) || hasUsage(row);
+}
+
+function hasUsage(message) {
+  if (message?.role !== "assistant") return false;
   const usage = message.usage || message.tokens;
   return usage ? usageTotal(usage) > 0 : false;
 }
@@ -251,10 +254,6 @@ function stopExisting(state) {
       process.kill(pid, "SIGTERM");
     } catch {}
   }
-}
-
-function finish() {
-  if (process.stdout.isTTY) process.stdout.write("\n");
 }
 
 function safeStat(file) {

@@ -43,4 +43,4 @@ xray --stdio
 - OpenClaw: counts new assistant JSONL messages with non-zero `usage`.
 - Pi/PII: counts new assistant JSONL messages with non-zero `usage`.
 
-For live use, start `xray` before sending the task to the agent. Use `--total` to count existing history too.
+For live use, start `xray` before sending the task to the agent.
