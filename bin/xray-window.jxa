@@ -1,4 +1,5 @@
 ObjC.import("Cocoa")
+ObjC.import("CoreGraphics")
 
 const args = $.NSProcessInfo.processInfo.arguments
 const statePath = ObjC.unwrap(args.objectAtIndex(args.count - 1))
@@ -158,6 +159,9 @@ for (let i = 0; i < rowCount; i++) {
 }
 
 function toggleDetails() {
+  const now = Date.now()
+  if (now - lastToggleAt < 250) return
+  lastToggleAt = now
   if (detail.isVisible()) {
     detail.orderOut(null)
   } else {
@@ -209,6 +213,17 @@ const globalClickMonitor = $.NSEvent.addGlobalMonitorForEventsMatchingMaskHandle
   },
 )
 
+let mouseWasDown = false
+function pollPopupClick() {
+  const down = $.CGEventSourceButtonState($.kCGEventSourceStateCombinedSessionState, $.kCGMouseButtonLeft)
+  if (down && !mouseWasDown) {
+    try {
+      if (pointInRect($.NSEvent.mouseLocation, win.frame)) toggleDetails()
+    } catch (_) {}
+  }
+  mouseWasDown = down
+}
+
 // Center by measuring the text and sizing the field to it.
 function place(f, text, y, h) {
   f.setStringValue(text)
@@ -223,6 +238,7 @@ let shownCalls = null
 let shownPrefix = null
 let shownModelsKey = null
 let shownDetailCalls = null
+let lastToggleAt = 0
 let displayFrac = 0
 let flash = 0 // 1 on a new call, decays each frame
 
@@ -299,6 +315,7 @@ tick()
 
 $.NSTimer.scheduledTimerWithTimeIntervalRepeatsBlock(0.033, true, () => {
   try {
+    pollPopupClick()
     tick()
   } catch (_) {}
 })
