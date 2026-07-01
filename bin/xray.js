@@ -53,16 +53,20 @@ function main() {
   const claudeHome = process.env.CLAUDE_CONFIG_DIR || path.join(home, ".claude");
 
   let calls = 0;
+  const models = {};
   let stopped = false;
-  writeState(statePath, calls, "counting");
+  writeState(statePath, calls, "counting", models);
 
-  const addCalls = (n) => {
-    if (!n) return;
-    calls += n;
-    writeState(statePath, calls, "counting");
+  const addRequests = (requests) => {
+    if (!requests.length) return;
+    calls += requests.length;
+    for (const request of requests) {
+      models[request.model] = (models[request.model] || 0) + 1;
+    }
+    writeState(statePath, calls, "counting", models);
   };
 
-  const collector = startOtelCollector({ onCalls: addCalls });
+  const collector = startOtelCollector({ onRequests: addRequests });
   collector.listen(0, "127.0.0.1", () => {
     let restoreConfig;
     let window;
@@ -87,7 +91,7 @@ function main() {
       stopped = true;
       try { restoreConfig?.(); } catch (e) { console.error(`xray restore warning: ${e.message}`); }
       try { collector.close(); } catch {}
-      writeState(statePath, calls, "stopped");
+      writeState(statePath, calls, "stopped", models);
       kill(window);
       process.exit(code);
     };
@@ -109,7 +113,7 @@ const kill = (p) => { try { p?.kill(); } catch {} };
 
 // ---- Codex OpenTelemetry collector ----
 
-function startOtelCollector({ onCalls }) {
+function startOtelCollector({ onRequests }) {
   const seenRequests = new Map();
   return http.createServer((req, res) => {
     if (req.method !== "POST") return res.writeHead(405).end();
@@ -117,12 +121,12 @@ function startOtelCollector({ onCalls }) {
     const chunks = [];
     req.on("data", (chunk) => chunks.push(chunk));
     req.on("end", () => {
-      let calls = 0;
+      let requests = [];
       try {
         const payload = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
-        calls = countOtelCalls(payload, { seenRequests });
+        requests = collectOtelRequests(payload, { seenRequests });
       } catch {}
-      onCalls(calls);
+      onRequests(requests);
       res.writeHead(200, { "content-type": "application/json" });
       res.end("{}");
     });
@@ -131,7 +135,11 @@ function startOtelCollector({ onCalls }) {
 }
 
 export function countOtelCalls(payload, { seenRequests = new Map() } = {}) {
-  let calls = 0;
+  return collectOtelRequests(payload, { seenRequests }).length;
+}
+
+export function collectOtelRequests(payload, { seenRequests = new Map() } = {}) {
+  const requests = [];
   for (const resource of payload?.resourceLogs || []) {
     for (const scope of resource.scopeLogs || []) {
       for (const record of scope.logRecords || []) {
@@ -140,11 +148,20 @@ export function countOtelCalls(payload, { seenRequests = new Map() } = {}) {
         const body = otelValue(record.body);
         if (!isLlmRequestEvent(name, attrs, body)) continue;
         if (seenRecently(record, attrs, seenRequests)) continue;
-        calls += 1;
+        requests.push({ model: requestModel(attrs), provider: requestProvider(name, body) });
       }
     }
   }
-  return calls;
+  return requests;
+}
+
+function requestModel(attrs) {
+  return String(attrs.model || attrs.slug || attrs["model.name"] || attrs["llm.model"] || "unknown").trim() || "unknown";
+}
+
+function requestProvider(name, body) {
+  if (body === "claude_code.api_request" || name === "api_request") return "claude";
+  return "codex";
 }
 
 function isLlmRequestEvent(name, attrs, body) {
@@ -382,9 +399,9 @@ function openWindow(statePath) {
   return spawn("osascript", ["-l", "JavaScript", script, statePath], { stdio: "ignore" });
 }
 
-function writeState(file, calls, status) {
+function writeState(file, calls, status, models = {}) {
   const tmp = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify({ label: "xray", calls, status, updated: Date.now() }));
+  fs.writeFileSync(tmp, JSON.stringify({ label: "xray", calls, models, status, updated: Date.now() }));
   fs.renameSync(tmp, file);
 }
 

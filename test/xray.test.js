@@ -6,6 +6,7 @@ import path from "node:path";
 
 process.env.XDG_STATE_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "xray-state-"));
 const {
+  collectOtelRequests,
   countOtelCalls,
   relaunchRunningCodexApp,
   withXrayClaudeSettings,
@@ -34,6 +35,26 @@ test("counts one call for each outbound websocket model request", () => {
     ] }] }],
   };
   assert.equal(countOtelCalls(payload), 2);
+});
+
+test("extracts per-model request counts from telemetry", () => {
+  const payload = {
+    resourceLogs: [{ scopeLogs: [{ logRecords: [
+      otelRecord("codex.websocket_request", { "conversation.id": "codex_one", model: "gpt-5.5" }),
+      {
+        body: { stringValue: "claude_code.api_request" },
+        attributes: [
+          attr("event.name", "api_request"),
+          attr("request_id", "req_one"),
+          attr("model", "claude-sonnet-4-6"),
+        ],
+      },
+    ] }] }],
+  };
+  assert.deepEqual(collectOtelRequests(payload).map((request) => request.model), [
+    "gpt-5.5",
+    "claude-sonnet-4-6",
+  ]);
 });
 
 test("counts HTTP Responses API request telemetry when it is the LLM call signal", () => {

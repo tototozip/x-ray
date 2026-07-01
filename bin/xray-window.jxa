@@ -5,6 +5,8 @@ const statePath = ObjC.unwrap(args.objectAtIndex(args.count - 1))
 const app = $.NSApplication.sharedApplication
 const width = 200
 const height = 178
+const detailWidth = 380
+const detailHeight = 304
 
 function readState() {
   const text = $.NSString.stringWithContentsOfFileEncodingError(statePath, $.NSUTF8StringEncoding, null)
@@ -85,6 +87,103 @@ function label(y, font, color) {
 const number = label(76, $.NSFont.monospacedDigitSystemFontOfSizeWeight(30, $.NSFontWeightBold), $.NSColor.whiteColor)
 const caption = label(16, $.NSFont.systemFontOfSizeWeight(10.5, $.NSFontWeightSemibold), dim)
 
+const detailRect = $.NSMakeRect(
+  screen.origin.x + screen.size.width - detailWidth - 24,
+  Math.max(screen.origin.y + 24, rect.origin.y - detailHeight - 12),
+  detailWidth,
+  detailHeight,
+)
+const detail = $.NSPanel.alloc.initWithContentRectStyleMaskBackingDefer(detailRect, style, $.NSBackingStoreBuffered, false)
+detail.setLevel($.NSFloatingWindowLevel)
+detail.setCollectionBehavior(
+  $.NSWindowCollectionBehaviorCanJoinAllSpaces | $.NSWindowCollectionBehaviorFullScreenAuxiliary,
+)
+detail.setMovableByWindowBackground(true)
+detail.setTitle("x-ray details")
+detail.setAppearance($.NSAppearance.appearanceNamed($.NSAppearanceNameDarkAqua))
+detail.setOpaque(false)
+detail.setBackgroundColor($.NSColor.colorWithCalibratedWhiteAlpha(0.11, 0.98))
+detail.setReleasedWhenClosed(false)
+
+function detailField(frame, font, color) {
+  const f = $.NSTextField.alloc.initWithFrame(frame)
+  f.setBezeled(false)
+  f.setDrawsBackground(false)
+  f.setEditable(false)
+  f.setSelectable(false)
+  f.setFont(font)
+  f.setTextColor(color)
+  detail.contentView.addSubview(f)
+  return f
+}
+
+const detailTitle = detailField(
+  $.NSMakeRect(22, detailHeight - 42, detailWidth - 44, 24),
+  $.NSFont.systemFontOfSizeWeight(17, $.NSFontWeightBold),
+  $.NSColor.whiteColor,
+)
+const detailSub = detailField(
+  $.NSMakeRect(22, detailHeight - 63, detailWidth - 44, 18),
+  $.NSFont.systemFontOfSizeWeight(11, $.NSFontWeightMedium),
+  dim,
+)
+
+const rowCount = 8
+const rowTop = detailHeight - 96
+const rowGap = 27
+const barX = 138
+const barW = 168
+const rows = []
+for (let i = 0; i < rowCount; i++) {
+  const y = rowTop - i * rowGap
+  const name = detailField(
+    $.NSMakeRect(22, y - 1, 108, 18),
+    $.NSFont.systemFontOfSizeWeight(10.5, $.NSFontWeightMedium),
+    $.NSColor.colorWithCalibratedWhiteAlpha(0.82, 1.0),
+  )
+  const track = box($.NSMakeRect(barX, y + 4, barW, 7))
+  track.setCornerRadius(3.5)
+  track.setFillColor($.NSColor.colorWithCalibratedWhiteAlpha(0.22, 1.0))
+  detail.contentView.addSubview(track)
+  const bar = box($.NSMakeRect(barX, y + 4, 0, 7))
+  bar.setCornerRadius(3.5)
+  bar.setFillColor(rgb(G, 1))
+  detail.contentView.addSubview(bar)
+  const value = detailField(
+    $.NSMakeRect(barX + barW + 10, y - 1, 48, 18),
+    $.NSFont.monospacedDigitSystemFontOfSizeWeight(11, $.NSFontWeightSemibold),
+    $.NSColor.whiteColor,
+  )
+  rows.push({ name, track, bar, value })
+}
+
+function toggleDetails() {
+  if (detail.isVisible()) {
+    detail.orderOut(null)
+  } else {
+    detail.makeKeyAndOrderFront(null)
+  }
+}
+
+ObjC.registerSubclass({
+  name: "XrayClickTarget",
+  methods: {
+    "toggleDetails:": {
+      types: ["void", ["id"]],
+      implementation: () => toggleDetails(),
+    },
+  },
+})
+
+const clickTarget = $.XrayClickTarget.alloc.init
+const clickButton = $.NSButton.alloc.initWithFrame($.NSMakeRect(0, 0, width, height))
+clickButton.setTitle("")
+clickButton.setBordered(false)
+clickButton.setTransparent(true)
+clickButton.setTarget(clickTarget)
+clickButton.setAction("toggleDetails:")
+win.contentView.addSubview(clickButton)
+
 // Center by measuring the text and sizing the field to it.
 function place(f, text, y, h) {
   f.setStringValue(text)
@@ -97,8 +196,51 @@ const K = 30 // the core approaches full as calls grow (about half-full around K
 
 let shownCalls = null
 let shownPrefix = null
+let shownModelsKey = null
+let shownDetailCalls = null
 let displayFrac = 0
 let flash = 0 // 1 on a new call, decays each frame
+
+function truncate(s, n) {
+  s = String(s)
+  return s.length <= n ? s : s.slice(0, Math.max(0, n - 3)) + "..."
+}
+
+function modelEntries(state) {
+  const models = state && state.models && typeof state.models === "object" ? state.models : {}
+  return Object.keys(models)
+    .map((name) => [name, Number(models[name]) || 0])
+    .filter((entry) => entry[1] > 0)
+    .sort((a, b) => b[1] - a[1] || String(a[0]).localeCompare(String(b[0])))
+}
+
+function updateDetails(state, calls) {
+  const entries = modelEntries(state)
+  const key = JSON.stringify(entries)
+  if (key === shownModelsKey && calls === shownDetailCalls) return
+  shownModelsKey = key
+  shownDetailCalls = calls
+
+  detailTitle.setStringValue("LLM calls by model")
+  detailSub.setStringValue(entries.length ? `${calls} total across ${entries.length} model${entries.length === 1 ? "" : "s"}` : "No model calls yet")
+
+  const max = entries.length ? entries[0][1] : 1
+  for (let i = 0; i < rowCount; i++) {
+    const entry = entries[i]
+    if (!entry) {
+      rows[i].name.setStringValue("")
+      rows[i].value.setStringValue("")
+      rows[i].bar.setFrame($.NSMakeRect(barX, rowTop - i * rowGap + 4, 0, 7))
+      continue
+    }
+    const [name, value] = entry
+    const y = rowTop - i * rowGap
+    const w = Math.max(4, Math.round((value / max) * barW))
+    rows[i].name.setStringValue(truncate(name, 18))
+    rows[i].value.setStringValue(String(value))
+    rows[i].bar.setFrame($.NSMakeRect(barX, y + 4, w, 7))
+  }
+}
 
 function tick() {
   if (!win.isVisible) return app.terminate(null)
@@ -112,6 +254,7 @@ function tick() {
     shownCalls = calls
     shownPrefix = prefix
   }
+  updateDetails(state, calls)
 
   const target = calls / (calls + K)
   displayFrac += (target - displayFrac) * 0.18 // ease the core toward its size
