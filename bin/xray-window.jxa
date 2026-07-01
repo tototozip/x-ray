@@ -27,7 +27,7 @@ const rect = $.NSMakeRect(
   width,
   height,
 )
-const style = $.NSWindowStyleMaskTitled | $.NSWindowStyleMaskClosable
+const style = $.NSWindowStyleMaskTitled | $.NSWindowStyleMaskClosable | $.NSWindowStyleMaskNonactivatingPanel
 const win = $.NSPanel.alloc.initWithContentRectStyleMaskBackingDefer(rect, style, $.NSBackingStoreBuffered, false)
 
 win.setLevel($.NSFloatingWindowLevel)
