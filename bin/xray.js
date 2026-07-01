@@ -54,16 +54,18 @@ function main() {
 
   let calls = 0;
   const models = {};
+  const providers = {};
   let stopped = false;
-  writeState(statePath, calls, "counting", models);
+  writeState(statePath, calls, "counting", models, providers);
 
   const addRequests = (requests) => {
     if (!requests.length) return;
     calls += requests.length;
     for (const request of requests) {
       models[request.model] = (models[request.model] || 0) + 1;
+      providers[request.model] = request.provider;
     }
-    writeState(statePath, calls, "counting", models);
+    writeState(statePath, calls, "counting", models, providers);
   };
 
   const collector = startOtelCollector({ onRequests: addRequests });
@@ -91,7 +93,7 @@ function main() {
       stopped = true;
       try { restoreConfig?.(); } catch (e) { console.error(`xray restore warning: ${e.message}`); }
       try { collector.close(); } catch {}
-      writeState(statePath, calls, "stopped", models);
+      writeState(statePath, calls, "stopped", models, providers);
       kill(window);
       process.exit(code);
     };
@@ -399,9 +401,9 @@ function openWindow(statePath) {
   return spawn("osascript", ["-l", "JavaScript", script, statePath], { stdio: "ignore" });
 }
 
-function writeState(file, calls, status, models = {}) {
+function writeState(file, calls, status, models = {}, providers = {}) {
   const tmp = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify({ label: "xray", calls, models, status, updated: Date.now() }));
+  fs.writeFileSync(tmp, JSON.stringify({ label: "xray", calls, models, providers, status, updated: Date.now() }));
   fs.renameSync(tmp, file);
 }
 

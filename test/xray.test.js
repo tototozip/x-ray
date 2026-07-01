@@ -51,9 +51,9 @@ test("extracts per-model request counts from telemetry", () => {
       },
     ] }] }],
   };
-  assert.deepEqual(collectOtelRequests(payload).map((request) => request.model), [
-    "gpt-5.5",
-    "claude-sonnet-4-6",
+  assert.deepEqual(collectOtelRequests(payload), [
+    { model: "gpt-5.5", provider: "codex" },
+    { model: "claude-sonnet-4-6", provider: "claude" },
   ]);
 });
 

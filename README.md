@@ -15,7 +15,7 @@ codex llm calls: 6
 ```
 
 Click the floating window to toggle a larger details panel with per-model call
-counts.
+counts. Codex and Claude Code models use different bar colors.
 
 Use Codex in the desktop app or from another terminal. When you are done, close
 the window or press Ctrl-C in the terminal running `xray`. `xray` restores your
