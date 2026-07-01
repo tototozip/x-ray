@@ -14,7 +14,7 @@ calls until you stop it:
 codex llm calls: 6
 ```
 
-Click the floating window to open a larger details panel with per-model call
+Click the floating window to toggle a larger details panel with per-model call
 counts.
 
 Use Codex in the desktop app or from another terminal. When you are done, close

@@ -1,5 +1,4 @@
 ObjC.import("Cocoa")
-ObjC.import("CoreGraphics")
 
 const args = $.NSProcessInfo.processInfo.arguments
 const statePath = ObjC.unwrap(args.objectAtIndex(args.count - 1))
@@ -28,7 +27,7 @@ const rect = $.NSMakeRect(
   width,
   height,
 )
-const style = $.NSWindowStyleMaskTitled | $.NSWindowStyleMaskClosable
+const style = $.NSWindowStyleMaskTitled | $.NSWindowStyleMaskClosable | $.NSWindowStyleMaskNonactivatingPanel
 const win = $.NSPanel.alloc.initWithContentRectStyleMaskBackingDefer(rect, style, $.NSBackingStoreBuffered, false)
 
 win.setLevel($.NSFloatingWindowLevel)
@@ -158,10 +157,6 @@ for (let i = 0; i < rowCount; i++) {
   rows.push({ name, track, bar, value })
 }
 
-function openDetails() {
-  if (!detail.isVisible) detail.orderFront(null)
-}
-
 function toggleDetails() {
   const now = Date.now()
   if (now - lastToggleAt < 250) return
@@ -169,7 +164,7 @@ function toggleDetails() {
   if (detail.isVisible) {
     detail.orderOut(null)
   } else {
-    openDetails()
+    detail.makeKeyAndOrderFront(null)
   }
 }
 
@@ -209,25 +204,6 @@ let shownDetailCalls = null
 let lastToggleAt = 0
 let displayFrac = 0
 let flash = 0 // 1 on a new call, decays each frame
-
-function pointInRect(point, frame) {
-  return point.x >= frame.origin.x &&
-    point.x <= frame.origin.x + frame.size.width &&
-    point.y >= frame.origin.y &&
-    point.y <= frame.origin.y + frame.size.height
-}
-
-function cocoaMouseLocation() {
-  const event = $.CGEventCreate(null)
-  const point = $.CGEventGetLocation(event)
-  const screenFrame = $.NSScreen.mainScreen.frame
-  return { x: point.x, y: screenFrame.size.height - point.y }
-}
-
-function pollPopupHover() {
-  const inside = pointInRect(cocoaMouseLocation(), win.frame)
-  if (inside && !detail.isVisible) openDetails()
-}
 
 function truncate(s, n) {
   s = String(s)
@@ -302,7 +278,6 @@ tick()
 
 $.NSTimer.scheduledTimerWithTimeIntervalRepeatsBlock(0.033, true, () => {
   try {
-    pollPopupHover()
     tick()
   } catch (_) {}
 })
