@@ -14,6 +14,15 @@ export function textIsRisky(text) {
   return riskyPattern.test(String(text || ""));
 }
 
+export function providerRequestModel(_provider, requestBody) {
+  try {
+    const parsed = JSON.parse(Buffer.isBuffer(requestBody) ? requestBody.toString("utf8") : String(requestBody || ""));
+    return String(parsed.model || "unknown").trim() || "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
 export function scanProviderResponseChunk(provider, chunk) {
   const text = Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk || "");
   return sseEvents(text).some((event) => scanProviderResponseEvent(provider, event));
@@ -185,6 +194,7 @@ function forwardProviderRequest(req, res, { provider, onRisky }) {
   req.on("data", (chunk) => requestChunks.push(chunk));
   req.on("end", () => {
     const requestBody = Buffer.concat(requestChunks);
+    const model = providerRequestModel(provider, requestBody);
     const headers = { ...req.headers, host: provider === "anthropic" ? "api.anthropic.com" : "api.openai.com" };
     delete headers["proxy-connection"];
     headers["accept-encoding"] = "identity";
@@ -210,7 +220,7 @@ function forwardProviderRequest(req, res, { provider, onRisky }) {
             if (!marked && scanProviderResponseEvent(provider, part)) {
               marked = true;
               debugProxy(`${provider} risky response ${req.url}`);
-              onRisky?.({ provider });
+              onRisky?.({ provider, model });
               break;
             }
           }

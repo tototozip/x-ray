@@ -15,7 +15,9 @@ codex llm calls: 6
 ```
 
 Click the floating window to toggle a larger details panel with per-model call
-counts. Codex and Claude Code models use different bar colors.
+counts. Codex and Claude Code models use different bar colors, and risky
+returned messages show as a red segment inside the model bar. The compact popup
+also flashes red briefly when a risky returned message is detected.
 
 Use Codex in the desktop app or from another terminal. When you are done, close
 the window or press Ctrl-C in the terminal running `xray`. `xray` restores your

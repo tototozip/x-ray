@@ -13,6 +13,7 @@ const {
   withXrayOtelConfig,
 } = await import("../bin/xray.js");
 const {
+  providerRequestModel,
   scanProviderResponseChunk,
   textIsRisky,
 } = await import("../bin/xray-proxy.js");
@@ -252,6 +253,12 @@ test("detects risky response markers", () => {
   assert.equal(textIsRisky("use rm -rf on a temp dir"), true);
   assert.equal(textIsRisky("call apply_patch"), true);
   assert.equal(textIsRisky("plain assistant text"), false);
+});
+
+test("extracts provider request model for risky per-model UI", () => {
+  assert.equal(providerRequestModel("openai", JSON.stringify({ model: "gpt-5.5" })), "gpt-5.5");
+  assert.equal(providerRequestModel("anthropic", Buffer.from(JSON.stringify({ model: "claude-sonnet-4-6" }))), "claude-sonnet-4-6");
+  assert.equal(providerRequestModel("openai", "not json"), "unknown");
 });
 
 test("scans provider response streams for risky text", () => {

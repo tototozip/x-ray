@@ -44,6 +44,7 @@ win.setBackgroundColor($.NSColor.colorWithCalibratedWhiteAlpha(0.13, 1.0))
 const G = [0.36, 0.86, 0.52] // Codex green
 const CLAUDE = [0.95, 0.55, 0.28]
 const UNKNOWN = [0.72, 0.72, 0.72]
+const RED = [1.0, 0.22, 0.24]
 const rgb = (c, a) => $.NSColor.colorWithCalibratedRedGreenBlueAlpha(c[0], c[1], c[2], a)
 const lerp = (a, b, t) => a + (b - a) * t
 const dim = $.NSColor.colorWithCalibratedWhiteAlpha(0.55, 1.0)
@@ -147,6 +148,12 @@ const legendClaude = detailField(
   rgb(CLAUDE, 1),
 )
 legendClaude.setStringValue("Claude")
+const legendRisky = detailField(
+  $.NSMakeRect(166, detailHeight - 84, 76, 16),
+  $.NSFont.systemFontOfSizeWeight(10, $.NSFontWeightSemibold),
+  rgb(RED, 1),
+)
+legendRisky.setStringValue("Risky")
 
 const rowCount = 8
 const rowTop = detailHeight - 108
@@ -169,12 +176,16 @@ for (let i = 0; i < rowCount; i++) {
   bar.setCornerRadius(3.5)
   bar.setFillColor(rgb(G, 1))
   detail.contentView.addSubview(bar)
+  const riskBar = box($.NSMakeRect(barX, y + 4, 0, 7))
+  riskBar.setCornerRadius(3.5)
+  riskBar.setFillColor(rgb(RED, 1))
+  detail.contentView.addSubview(riskBar)
   const value = detailField(
     $.NSMakeRect(barX + barW + 10, y - 1, 48, 18),
-    $.NSFont.monospacedDigitSystemFontOfSizeWeight(11, $.NSFontWeightSemibold),
+    $.NSFont.monospacedDigitSystemFontOfSizeWeight(10.5, $.NSFontWeightSemibold),
     $.NSColor.whiteColor,
   )
-  rows.push({ name, track, bar, value })
+  rows.push({ name, track, bar, riskBar, value })
 }
 
 function toggleDetails() {
@@ -226,6 +237,7 @@ let shownDetailRisky = null
 let lastToggleAt = 0
 let displayFrac = 0
 let flash = 0 // 1 on a new call, decays each frame
+let riskyFlash = 0 // risky responses briefly override the green pulse with red
 
 function truncate(s, n) {
   s = String(s)
@@ -244,8 +256,13 @@ function modelProvider(name, providers) {
 function modelEntries(state) {
   const models = state && state.models && typeof state.models === "object" ? state.models : {}
   const providers = state && state.providers && typeof state.providers === "object" ? state.providers : {}
-  return Object.keys(models)
-    .map((name) => [name, Number(models[name]) || 0, modelProvider(name, providers)])
+  const riskyModels = state && state.riskyModels && typeof state.riskyModels === "object" ? state.riskyModels : {}
+  return Object.keys(Object.assign({}, models, riskyModels))
+    .map((name) => {
+      const value = Number(models[name]) || 0
+      const risky = Math.max(0, Math.min(value, Number(riskyModels[name]) || 0))
+      return [name, value, modelProvider(name, providers), risky]
+    })
     .filter((entry) => entry[1] > 0)
     .sort((a, b) => b[1] - a[1] || String(a[0]).localeCompare(String(b[0])))
 }
@@ -269,15 +286,18 @@ function updateDetails(state, calls) {
       rows[i].name.setStringValue("")
       rows[i].value.setStringValue("")
       rows[i].bar.setFrame($.NSMakeRect(barX, rowTop - i * rowGap + 4, 0, 7))
+      rows[i].riskBar.setFrame($.NSMakeRect(barX, rowTop - i * rowGap + 4, 0, 7))
       continue
     }
-    const [name, value, provider] = entry
+    const [name, value, provider, riskyValue] = entry
     const y = rowTop - i * rowGap
     const w = Math.max(4, Math.round((value / max) * barW))
+    const riskW = riskyValue > 0 ? Math.max(4, Math.round((riskyValue / value) * w)) : 0
     rows[i].name.setStringValue(truncate(name, 18))
-    rows[i].value.setStringValue(String(value))
+    rows[i].value.setStringValue(riskyValue > 0 ? `${riskyValue}/${value}` : String(value))
     rows[i].bar.setFillColor(rgb(providerColor(provider), 1))
     rows[i].bar.setFrame($.NSMakeRect(barX, y + 4, w, 7))
+    rows[i].riskBar.setFrame($.NSMakeRect(barX + w - riskW, y + 4, riskW, 7))
   }
 }
 
@@ -289,6 +309,7 @@ function tick() {
   const prefix = state && state.label ? String(state.label).toUpperCase() + " · " : ""
   if (calls !== shownCalls || risky !== shownRisky || prefix !== shownPrefix) {
     if (shownCalls !== null && calls > shownCalls) flash = 1
+    if (shownRisky !== null && risky > shownRisky) riskyFlash = 1
     place(number, String(calls), 76, 40)
     place(caption, `${prefix}LLM CALLS · ${risky} RISKY`, 16, 15)
     shownCalls = calls
@@ -299,15 +320,21 @@ function tick() {
 
   const target = calls / (calls + K)
   displayFrac += (target - displayFrac) * 0.18 // ease the core toward its size
-  const s = Math.min(1, displayFrac + flash * 0.06) * D // little surge on a new call
+  const pulse = Math.max(flash, riskyFlash)
+  const s = Math.min(1, displayFrac + pulse * 0.06) * D // little surge on a new call
   disc.setFrame($.NSMakeRect(cx - s / 2, cy - s / 2, s, s))
   disc.setCornerRadius(s / 2)
-  disc.setFillColor(rgb([lerp(G[0], 0.7, flash), lerp(G[1], 1, flash), lerp(G[2], 0.8, flash)], 1))
-  ring.setBorderColor(rgb(G, lerp(0.45, 1, flash)))
-  number.setTextColor(rgb([lerp(1, G[0], flash), lerp(1, G[1], flash), lerp(1, G[2], flash)], 1))
+  const callFill = [lerp(G[0], 0.7, flash), lerp(G[1], 1, flash), lerp(G[2], 0.8, flash)]
+  const fill = [lerp(callFill[0], RED[0], riskyFlash), lerp(callFill[1], RED[1], riskyFlash), lerp(callFill[2], RED[2], riskyFlash)]
+  const textColor = [lerp(1, fill[0], pulse), lerp(1, fill[1], pulse), lerp(1, fill[2], pulse)]
+  disc.setFillColor(rgb(fill, 1))
+  ring.setBorderColor(rgb(fill, lerp(0.45, 1, pulse)))
+  number.setTextColor(rgb(textColor, 1))
 
   flash *= 0.88
+  riskyFlash *= 0.84
   if (flash < 0.02) flash = 0
+  if (riskyFlash < 0.02) riskyFlash = 0
 }
 
 win.makeKeyAndOrderFront(null)
