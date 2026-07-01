@@ -27,7 +27,7 @@ const rect = $.NSMakeRect(
   width,
   height,
 )
-const style = $.NSWindowStyleMaskTitled | $.NSWindowStyleMaskClosable | $.NSWindowStyleMaskNonactivatingPanel
+const style = $.NSWindowStyleMaskTitled | $.NSWindowStyleMaskClosable
 const win = $.NSPanel.alloc.initWithContentRectStyleMaskBackingDefer(rect, style, $.NSBackingStoreBuffered, false)
 
 win.setLevel($.NSFloatingWindowLevel)
@@ -166,19 +166,48 @@ function toggleDetails() {
 }
 
 ObjC.registerSubclass({
-  name: "XrayClickTarget",
+  name: "XrayClickView",
+  superclass: "NSView",
   methods: {
-    "toggleDetails:": {
+    "acceptsFirstMouse:": {
+      types: ["bool", ["id"]],
+      implementation: () => true,
+    },
+    "mouseDown:": {
       types: ["void", ["id"]],
       implementation: () => toggleDetails(),
     },
   },
 })
 
-const clickTarget = $.XrayClickTarget.alloc.init
-const clickGesture = $.NSClickGestureRecognizer.alloc.initWithTargetAction(clickTarget, "toggleDetails:")
-clickGesture.setNumberOfClicksRequired(1)
-win.contentView.addGestureRecognizer(clickGesture)
+const clickView = $.XrayClickView.alloc.initWithFrame($.NSMakeRect(0, 0, width, height))
+clickView.setAutoresizingMask($.NSViewWidthSizable | $.NSViewHeightSizable)
+win.contentView.addSubview(clickView)
+
+function pointInRect(point, frame) {
+  return point.x >= frame.origin.x &&
+    point.x <= frame.origin.x + frame.size.width &&
+    point.y >= frame.origin.y &&
+    point.y <= frame.origin.y + frame.size.height
+}
+
+const localClickMonitor = $.NSEvent.addLocalMonitorForEventsMatchingMaskHandler(
+  $.NSEventMaskLeftMouseDown,
+  (event) => {
+    try {
+      if (event.window && event.window.windowNumber === win.windowNumber) toggleDetails()
+    } catch (_) {}
+    return event
+  },
+)
+const globalClickMonitor = $.NSEvent.addGlobalMonitorForEventsMatchingMaskHandler(
+  $.NSEventMaskLeftMouseDown,
+  () => {
+    try {
+      if (pointInRect($.NSEvent.mouseLocation, win.frame)) toggleDetails()
+    } catch (_) {}
+  },
+)
 
 // Center by measuring the text and sizing the field to it.
 function place(f, text, y, h) {
