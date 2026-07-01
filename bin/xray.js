@@ -62,14 +62,17 @@ function main() {
   const models = {};
   const providers = {};
   const riskyModels = {};
+  const riskyActions = {};
   let risky = 0;
   let stopped = false;
-  writeState(statePath, { calls, risky, status: "counting", models, providers, riskyModels });
+  writeState(statePath, { calls, risky, status: "counting", models, providers, riskyModels, riskyActions });
 
-  const addRisky = ({ provider = "unknown", model = "unknown" } = {}) => {
+  const addRisky = ({ provider = "unknown", model = "unknown", action = "unknown" } = {}) => {
     risky += 1;
+    const actionName = String(action || "unknown").trim() || "unknown";
     if (model !== "unknown") riskyModels[model] = (riskyModels[model] || 0) + 1;
-    writeState(statePath, { calls, risky, status: "counting", models, providers, riskyModels });
+    riskyActions[actionName] = (riskyActions[actionName] || 0) + 1;
+    writeState(statePath, { calls, risky, status: "counting", models, providers, riskyModels, riskyActions });
   };
 
   const addRequests = (requests) => {
@@ -79,7 +82,7 @@ function main() {
       models[request.model] = (models[request.model] || 0) + 1;
       providers[request.model] = request.provider;
     }
-    writeState(statePath, { calls, risky, status: "counting", models, providers, riskyModels });
+    writeState(statePath, { calls, risky, status: "counting", models, providers, riskyModels, riskyActions });
   };
 
   const collector = startOtelCollector({ onRequests: addRequests });
@@ -114,7 +117,7 @@ function main() {
       try { riskProxy?.close(); } catch {}
       try { riskProxy?.cleanup(); } catch {}
       try { collector.close(); } catch {}
-      writeState(statePath, { calls, risky, status: "stopped", models, providers, riskyModels });
+      writeState(statePath, { calls, risky, status: "stopped", models, providers, riskyModels, riskyActions });
       kill(window);
       process.exit(code);
     };
@@ -450,9 +453,9 @@ function openWindow(statePath) {
   return spawn("osascript", ["-l", "JavaScript", script, statePath], { stdio: "ignore" });
 }
 
-function writeState(file, { calls, risky = 0, status, models = {}, providers = {}, riskyModels = {} }) {
+function writeState(file, { calls, risky = 0, status, models = {}, providers = {}, riskyModels = {}, riskyActions = {} }) {
   const tmp = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify({ label: "xray", calls, risky, models, providers, riskyModels, status, updated: Date.now() }));
+  fs.writeFileSync(tmp, JSON.stringify({ label: "xray", calls, risky, models, providers, riskyModels, riskyActions, status, updated: Date.now() }));
   fs.renameSync(tmp, file);
 }
 

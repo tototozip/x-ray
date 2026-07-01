@@ -206,6 +206,17 @@ function toggleDetails() {
   }
 }
 
+function toggleRiskDistribution() {
+  const now = Date.now()
+  if (now - lastRiskToggleAt < 250) return
+  lastRiskToggleAt = now
+  detailMode = detailMode === "risks" ? "models" : "risks"
+  shownModelsKey = null
+  const state = readState()
+  const calls = state && typeof state.calls === "number" ? state.calls : 0
+  updateDetails(state, calls)
+}
+
 ObjC.registerSubclass({
   name: "XrayClickView",
   superclass: "NSView",
@@ -221,9 +232,28 @@ ObjC.registerSubclass({
   },
 })
 
+ObjC.registerSubclass({
+  name: "XrayRiskClickView",
+  superclass: "NSView",
+  methods: {
+    "acceptsFirstMouse:": {
+      types: ["bool", ["id"]],
+      implementation: () => true,
+    },
+    "mouseDown:": {
+      types: ["void", ["id"]],
+      implementation: () => toggleRiskDistribution(),
+    },
+  },
+})
+
 const clickView = $.XrayClickView.alloc.initWithFrame($.NSMakeRect(0, 0, width, height))
 clickView.setAutoresizingMask($.NSViewWidthSizable | $.NSViewHeightSizable)
 win.contentView.addSubview(clickView)
+
+const riskClickView = $.XrayRiskClickView.alloc.initWithFrame($.NSMakeRect(158, detailHeight - 92, 94, 30))
+riskClickView.setToolTip("Toggle risky action distribution")
+detail.contentView.addSubview(riskClickView)
 
 // Center by measuring the text and sizing the field to it.
 function place(f, text, y, h) {
@@ -242,6 +272,8 @@ let shownModelsKey = null
 let shownDetailCalls = null
 let shownDetailRisky = null
 let lastToggleAt = 0
+let lastRiskToggleAt = 0
+let detailMode = "models"
 let displayFrac = 0
 let flash = 0 // 1 on a new call, decays each frame
 let riskyFlash = 0 // risky responses briefly override the green pulse with red
@@ -274,26 +306,52 @@ function modelEntries(state) {
     .sort((a, b) => b[1] - a[1] || String(a[0]).localeCompare(String(b[0])))
 }
 
+function riskActionEntries(state) {
+  const actions = state && state.riskyActions && typeof state.riskyActions === "object" ? state.riskyActions : {}
+  return Object.keys(actions)
+    .map((name) => [name, Number(actions[name]) || 0])
+    .filter((entry) => entry[1] > 0)
+    .sort((a, b) => b[1] - a[1] || String(a[0]).localeCompare(String(b[0])))
+}
+
 function updateDetails(state, calls) {
-  const entries = modelEntries(state)
   const risky = state && typeof state.risky === "number" ? state.risky : 0
-  const key = JSON.stringify(entries)
+  const entries = detailMode === "risks" ? riskActionEntries(state) : modelEntries(state)
+  const key = `${detailMode}:${JSON.stringify(entries)}`
   if (key === shownModelsKey && calls === shownDetailCalls && risky === shownDetailRisky) return
   shownModelsKey = key
   shownDetailCalls = calls
   shownDetailRisky = risky
 
+  if (detailMode === "risks") {
+    updateRiskDetails(entries, risky)
+  } else {
+    updateModelDetails(entries, calls, risky)
+  }
+}
+
+function clearRow(i) {
+  rows[i].name.setStringValue("")
+  rows[i].value.setStringValue("")
+  rows[i].bar.setFrame($.NSMakeRect(barX, rowTop - i * rowGap + 4, 0, 7))
+  rows[i].riskBar.setFrame($.NSMakeRect(barX, rowTop - i * rowGap + 4, 0, 7))
+}
+
+function updateModelDetails(entries, calls, risky) {
   detailTitle.setStringValue("LLM calls by model")
-  detailSub.setStringValue(entries.length ? `${calls} total · ${risky} risky across ${entries.length} model${entries.length === 1 ? "" : "s"}` : `${risky} risky · no model calls yet`)
+  detailSub.setStringValue(entries.length ? `${calls} total · ${risky} risky · click Risky for actions` : `${risky} risky · no model calls yet`)
+  legendCodex.setStringValue("Codex")
+  legendCodex.setTextColor(rgb(G, 1))
+  legendClaude.setStringValue("Claude")
+  legendClaude.setTextColor(rgb(CLAUDE, 1))
+  legendRisky.setStringValue("Risky")
+  legendRisky.setTextColor(rgb(RED, 1))
 
   const max = entries.length ? entries[0][1] : 1
   for (let i = 0; i < rowCount; i++) {
     const entry = entries[i]
     if (!entry) {
-      rows[i].name.setStringValue("")
-      rows[i].value.setStringValue("")
-      rows[i].bar.setFrame($.NSMakeRect(barX, rowTop - i * rowGap + 4, 0, 7))
-      rows[i].riskBar.setFrame($.NSMakeRect(barX, rowTop - i * rowGap + 4, 0, 7))
+      clearRow(i)
       continue
     }
     const [name, value, provider, riskyValue] = entry
@@ -305,6 +363,33 @@ function updateDetails(state, calls) {
     rows[i].bar.setFillColor(rgb(providerColor(provider), 1))
     rows[i].bar.setFrame($.NSMakeRect(barX, y + 4, w, 7))
     rows[i].riskBar.setFrame($.NSMakeRect(barX + w - riskW, y + 4, riskW, 7))
+  }
+}
+
+function updateRiskDetails(entries, risky) {
+  detailTitle.setStringValue("Risky calls by action")
+  detailSub.setStringValue(entries.length ? `${risky} risky total · click Risky to return` : "No risky actions yet · click Risky to return")
+  legendCodex.setStringValue("Actions")
+  legendCodex.setTextColor(rgb(RED, 1))
+  legendClaude.setStringValue("")
+  legendRisky.setStringValue("Risky")
+  legendRisky.setTextColor(rgb(RED, 1))
+
+  const max = entries.length ? entries[0][1] : 1
+  for (let i = 0; i < rowCount; i++) {
+    const entry = entries[i]
+    if (!entry) {
+      clearRow(i)
+      continue
+    }
+    const [name, value] = entry
+    const y = rowTop - i * rowGap
+    const w = Math.max(4, Math.round((value / max) * barW))
+    rows[i].name.setStringValue(truncate(name, 18))
+    rows[i].value.setStringValue(String(value))
+    rows[i].bar.setFillColor(rgb(RED, 1))
+    rows[i].bar.setFrame($.NSMakeRect(barX, y + 4, w, 7))
+    rows[i].riskBar.setFrame($.NSMakeRect(barX, y + 4, 0, 7))
   }
 }
 

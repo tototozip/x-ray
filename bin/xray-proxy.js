@@ -6,12 +6,38 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 
-export const riskyPattern = /\b(git|chmod|kill|pkill|osascript|curl|sqlite3)\b|\brm\s+|\brm\s+-rf\b|\bapply_patch\b|\bnpm\s+install\b/i;
+export const riskyPattern = /\brm\s+-rf\b|\bnpm\s+install\b|\bapply_patch\b|\b(git|chmod|kill|pkill|osascript|curl|sqlite3)\b|\brm\s+/i;
+
+const riskyActionPatterns = [
+  ["rm -rf", /\brm\s+-rf\b/i],
+  ["npm install", /\bnpm\s+install\b/i],
+  ["apply_patch", /\bapply_patch\b/i],
+  ["git", /\bgit\b/i],
+  ["chmod", /\bchmod\b/i],
+  ["kill", /\bkill\b/i],
+  ["pkill", /\bpkill\b/i],
+  ["osascript", /\bosascript\b/i],
+  ["curl", /\bcurl\b/i],
+  ["sqlite3", /\bsqlite3\b/i],
+  ["rm", /\brm\s+/i],
+];
 
 const interceptedHosts = new Set(["api.anthropic.com", "api.openai.com"]);
 
 export function textIsRisky(text) {
-  return riskyPattern.test(String(text || ""));
+  return riskyAction(text) !== null;
+}
+
+export function riskyAction(text) {
+  const value = String(text || "");
+  const matches = [];
+  for (let priority = 0; priority < riskyActionPatterns.length; priority++) {
+    const [action, pattern] = riskyActionPatterns[priority];
+    const match = value.match(pattern);
+    if (match) matches.push({ action, index: match.index ?? 0, priority });
+  }
+  matches.sort((a, b) => a.index - b.index || a.priority - b.priority);
+  return matches[0]?.action || null;
 }
 
 export function providerRequestModel(_provider, requestBody) {
@@ -24,31 +50,43 @@ export function providerRequestModel(_provider, requestBody) {
 }
 
 export function scanProviderResponseChunk(provider, chunk) {
+  return scanProviderResponseAction(provider, chunk) !== null;
+}
+
+export function scanProviderResponseAction(provider, chunk) {
   const text = Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk || "");
-  return sseEvents(text).some((event) => scanProviderResponseEvent(provider, event));
+  for (const event of sseEvents(text)) {
+    const action = scanProviderResponseEventAction(provider, event);
+    if (action) return action;
+  }
+  return null;
 }
 
 export function scanProviderResponseEvent(provider, event) {
+  return scanProviderResponseEventAction(provider, event) !== null;
+}
+
+export function scanProviderResponseEventAction(provider, event) {
   const data = eventData(event);
-  if (!data || data === "[DONE]") return false;
+  if (!data || data === "[DONE]") return null;
   let parsed;
   try {
     parsed = JSON.parse(data);
   } catch {
-    return false;
+    return null;
   }
 
   if (provider === "anthropic") {
-    return [
+    return firstRiskyAction([
       parsed.delta?.text,
       parsed.delta?.partial_json,
       parsed.content_block?.text,
       parsed.content_block?.input,
-    ].some(textIsRisky);
+    ]);
   }
 
   if (provider === "openai") {
-    return [
+    return firstRiskyAction([
       parsed.delta,
       parsed.arguments,
       parsed.item?.arguments,
@@ -58,10 +96,10 @@ export function scanProviderResponseEvent(provider, event) {
         item.input,
         ...(item.content || []).map((content) => content.text),
       ]),
-    ].some(textIsRisky);
+    ]);
   }
 
-  return false;
+  return null;
 }
 
 export function startRiskProxy({ onRisky, workDir = fs.mkdtempSync(path.join(os.tmpdir(), "xray-proxy-")) } = {}) {
@@ -217,10 +255,11 @@ function forwardProviderRequest(req, res, { provider, onRisky }) {
           const parts = scanBuffer.split(/\r?\n\r?\n/);
           scanBuffer = parts.pop() || "";
           for (const part of parts) {
-            if (!marked && scanProviderResponseEvent(provider, part)) {
+            const action = scanProviderResponseEventAction(provider, part);
+            if (!marked && action) {
               marked = true;
-              debugProxy(`${provider} risky response ${req.url}`);
-              onRisky?.({ provider, model });
+              debugProxy(`${provider} risky response ${action} ${req.url}`);
+              onRisky?.({ provider, model, action });
               break;
             }
           }
@@ -242,6 +281,14 @@ function forwardProviderRequest(req, res, { provider, onRisky }) {
 
 function debugProxy(message) {
   if (process.env.XRAY_PROXY_DEBUG === "1") console.error(`xray proxy: ${message}`);
+}
+
+function firstRiskyAction(values) {
+  for (const value of values) {
+    const action = riskyAction(value);
+    if (action) return action;
+  }
+  return null;
 }
 
 function sseEvents(text) {

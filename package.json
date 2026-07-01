@@ -1,6 +1,6 @@
 {
   "name": "@tototozip/x-ray",
-  "version": "0.7.2",
+  "version": "0.7.3",
   "description": "Minimal live Codex and Claude Code LLM call counter.",
   "type": "module",
   "bin": {

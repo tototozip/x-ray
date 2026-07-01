@@ -15,6 +15,8 @@ const {
 const {
   providerRequestModel,
   scanProviderResponseChunk,
+  scanProviderResponseAction,
+  riskyAction,
   textIsRisky,
 } = await import("../bin/xray-proxy.js");
 
@@ -255,6 +257,15 @@ test("detects risky response markers", () => {
   assert.equal(textIsRisky("plain assistant text"), false);
 });
 
+test("classifies risky response markers by action", () => {
+  assert.equal(riskyAction("run git status"), "git");
+  assert.equal(riskyAction("use rm -rf on a temp dir"), "rm -rf");
+  assert.equal(riskyAction("use rm file.txt"), "rm");
+  assert.equal(riskyAction("call apply_patch"), "apply_patch");
+  assert.equal(riskyAction("npm install from here"), "npm install");
+  assert.equal(riskyAction("plain assistant text"), null);
+});
+
 test("extracts provider request model for risky per-model UI", () => {
   assert.equal(providerRequestModel("openai", JSON.stringify({ model: "gpt-5.5" })), "gpt-5.5");
   assert.equal(providerRequestModel("anthropic", Buffer.from(JSON.stringify({ model: "claude-sonnet-4-6" }))), "claude-sonnet-4-6");
@@ -263,9 +274,13 @@ test("extracts provider request model for risky per-model UI", () => {
 
 test("scans provider response streams for risky text", () => {
   assert.equal(scanProviderResponseChunk("anthropic", 'event: content_block_delta\ndata: {"delta":{"text":"git status"}}'), true);
+  assert.equal(scanProviderResponseAction("anthropic", 'event: content_block_delta\ndata: {"delta":{"text":"rm -rf /tmp/x"}}'), "rm -rf");
+  assert.equal(scanProviderResponseAction("openai", 'data: {"type":"response.output_text.delta","delta":"npm install x"}'), "npm install");
   assert.equal(scanProviderResponseChunk("openai", 'data: {"type":"response.output_text.delta","delta":"apply_patch"}'), true);
   assert.equal(scanProviderResponseChunk("anthropic", 'event: ping\ndata: {"type":"ping"}'), false);
+  assert.equal(scanProviderResponseAction("anthropic", 'event: ping\ndata: {"type":"ping"}'), null);
   assert.equal(scanProviderResponseChunk("openai", 'data: {"type":"response.created","response":{"metadata":{"latest_git_commit_hash":"abc"}}}'), false);
+  assert.equal(scanProviderResponseAction("openai", 'data: {"type":"response.created","response":{"metadata":{"latest_git_commit_hash":"abc"}}}'), null);
 });
 
 test("does not relaunch Codex app when disabled or off macOS", () => {

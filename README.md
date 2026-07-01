@@ -17,7 +17,9 @@ codex llm calls: 6
 Click the floating window to toggle a larger details panel with per-model call
 counts. Codex and Claude Code models use different bar colors, and risky
 returned messages show as a red segment inside the model bar. The compact popup
-also flashes red briefly when a risky returned message is detected.
+also flashes red briefly when a risky returned message is detected. In the
+details panel, click `Risky` to toggle a distribution of risky calls by detected
+action, such as `git`, `rm -rf`, `apply_patch`, or `npm install`.
 
 Use Codex in the desktop app or from another terminal. When you are done, close
 the window or press Ctrl-C in the terminal running `xray`. `xray` restores your
