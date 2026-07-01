@@ -19,7 +19,8 @@ counts. Codex and Claude Code models use different bar colors, and risky
 returned messages show as a red segment inside the model bar. The compact popup
 also flashes red briefly when a risky returned message is detected. In the
 details panel, click `Risky` to toggle a distribution of risky calls by detected
-action, such as `git`, `rm -rf`, `apply_patch`, or `npm install`.
+action, such as `git push`, `rm -rf`, `secret/auth`, `package install`, or
+`cloud/infra`.
 
 Use Codex in the desktop app or from another terminal. When you are done, close
 the window or press Ctrl-C in the terminal running `xray`. `xray` restores your
@@ -45,8 +46,9 @@ LLM service:
 - Claude Code sessions started after `xray` launches also use a temporary local
   per-process HTTPS proxy and temporary CA file. `xray` scans streamed responses
   in memory and increments the risky count once per response when it sees
-  `git`, `rm`, `apply_patch`, `chmod`, `kill`, `pkill`, `osascript`, `npm install`,
-  `curl`, or `sqlite3`.
+  destructive deletes, Git mutations, secret/auth access, network calls, package
+  changes, file writes, process/system control, database mutations, cloud/infra
+  commands, browser control, or broad filesystem scans.
 - It does not modify Codex config, app-server state, certificates, or macOS proxy
   settings permanently. On exit, it restores the original Codex and Claude Code
   config files and removes the temporary proxy certificate files.

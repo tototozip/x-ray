@@ -6,21 +6,44 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 
-export const riskyPattern = /\brm\s+-rf\b|\bnpm\s+install\b|\bapply_patch\b|\b(git|chmod|kill|pkill|osascript|curl|sqlite3)\b|\brm\s+/i;
+export const riskyActionPatterns = [
+  ["rm -rf", /\brm\s+(-[^\s]*[rf][^\s]*|--recursive|--force)\b/i],
+  ["find -delete", /\bfind\b[\s\S]{0,160}(?:^|\s)-delete\b/i],
+  ["recursive delete", /\b(rimraf|shutil\.rmtree|fs\.rmSync|fs\.rm|Remove-Item)\b/i],
 
-const riskyActionPatterns = [
-  ["rm -rf", /\brm\s+-rf\b/i],
-  ["npm install", /\bnpm\s+install\b/i],
-  ["apply_patch", /\bapply_patch\b/i],
-  ["git", /\bgit\b/i],
-  ["chmod", /\bchmod\b/i],
-  ["kill", /\bkill\b/i],
-  ["pkill", /\bpkill\b/i],
-  ["osascript", /\bosascript\b/i],
-  ["curl", /\bcurl\b/i],
-  ["sqlite3", /\bsqlite3\b/i],
-  ["rm", /\brm\s+/i],
+  ["git push", /\bgit\s+push\b/i],
+  ["git reset", /\bgit\s+reset\b/i],
+  ["git clean", /\bgit\s+clean\b/i],
+  ["git rebase", /\bgit\s+rebase\b/i],
+  ["git merge", /\bgit\s+merge\b/i],
+  ["git commit", /\bgit\s+commit\b/i],
+  ["git checkout/switch", /\bgit\s+(checkout|switch)\b/i],
+  ["gh mutation", /\bgh\s+(pr\s+(create|merge|close)|repo\s+(delete|create)|issue\s+(create|close|edit)|release\s+(create|delete))\b/i],
+
+  ["secret/auth", /\b(gh\s+auth|security\s+find-|op\s+item|pass\b|keychain|credential|secret|token|api[_-]?key|OPENAI_API_KEY|ANTHROPIC_API_KEY|GITHUB_TOKEN)\b|\.env\b/i],
+
+  ["network", /\b(curl|wget|scp|rsync|sftp|ssh|nc|netcat)\b/i],
+  ["http client", /\b(fetch|axios|requests\.|urllib\.|httpx\.)\b/i],
+
+  ["package install", /\b(npm|pnpm|yarn|bun|pip|pip3|uv|cargo|brew|apt|apt-get|gem|go)\s+(install|add|update|upgrade|remove|uninstall|i\b)\b|\bnpx\b/i],
+
+  ["apply_patch", /\bapply_patch\b|\*\*\* Begin Patch/i],
+  ["file write", /\bcat\s+>>?|\b(tee\s+(-a\s+)?|sed\s+-i|perl\s+-pi)\b|\becho\b[\s\S]{0,120}>|\b(fs\.writeFile|fs\.appendFile|write_text|open\([^)]*['"]w)\b/i],
+  ["chmod/chown", /\b(chmod|chown)\b/i],
+
+  ["process control", /\b(sudo|kill|pkill|killall|launchctl|nohup|disown)\b/i],
+  ["mac system control", /\b(osascript|networksetup|defaults\s+write|xattr|codesign|spctl)\b/i],
+
+  ["database mutation", /\b(sqlite3|psql|mysql|mongosh|redis-cli)\b[\s\S]{0,200}\b(DELETE|DROP|UPDATE|INSERT|ALTER|TRUNCATE|VACUUM|REINDEX)\b|\b(DELETE FROM|DROP TABLE|TRUNCATE TABLE|ALTER TABLE|UPDATE\s+\w+\s+SET)\b/i],
+
+  ["cloud/infra", /\b(aws|gcloud|az|kubectl|helm|terraform|docker|docker-compose|podman)\s+(apply|delete|destroy|run|exec|push|build|deploy|create|update|set|scale|restart|stop|rm|rmi)\b/i],
+
+  ["browser control", /\b(playwright|puppeteer|selenium|computer use|screenshot|click|type|navigate)\b/i],
+
+  ["broad filesystem scan", /\b(find\s+~|grep\s+-R|rg\b[\s\S]{0,120}(\.env|token|secret|key|credential|\.ssh|\.aws|\.config))\b/i],
 ];
+
+export const riskyPattern = new RegExp(riskyActionPatterns.map(([, pattern]) => pattern.source).join("|"), "i");
 
 const interceptedHosts = new Set(["api.anthropic.com", "api.openai.com"]);
 

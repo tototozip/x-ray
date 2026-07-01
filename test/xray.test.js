@@ -251,18 +251,39 @@ test("adds Claude Code proxy env settings when provided", () => {
 });
 
 test("detects risky response markers", () => {
-  assert.equal(textIsRisky("run git status"), true);
+  assert.equal(textIsRisky("run git push origin main"), true);
   assert.equal(textIsRisky("use rm -rf on a temp dir"), true);
   assert.equal(textIsRisky("call apply_patch"), true);
+  assert.equal(textIsRisky("read git status"), false);
   assert.equal(textIsRisky("plain assistant text"), false);
 });
 
 test("classifies risky response markers by action", () => {
-  assert.equal(riskyAction("run git status"), "git");
+  assert.equal(riskyAction("run git push origin main"), "git push");
+  assert.equal(riskyAction("run git reset --hard HEAD~1"), "git reset");
+  assert.equal(riskyAction("run git clean -fd"), "git clean");
+  assert.equal(riskyAction("run git rebase main"), "git rebase");
+  assert.equal(riskyAction("run git merge feature"), "git merge");
+  assert.equal(riskyAction("run git commit -m x"), "git commit");
+  assert.equal(riskyAction("run git switch main"), "git checkout/switch");
+  assert.equal(riskyAction("gh pr merge 1"), "gh mutation");
   assert.equal(riskyAction("use rm -rf on a temp dir"), "rm -rf");
-  assert.equal(riskyAction("use rm file.txt"), "rm");
+  assert.equal(riskyAction("find . -name '*.tmp' -delete"), "find -delete");
+  assert.equal(riskyAction("shutil.rmtree(path)"), "recursive delete");
   assert.equal(riskyAction("call apply_patch"), "apply_patch");
-  assert.equal(riskyAction("npm install from here"), "npm install");
+  assert.equal(riskyAction("npm install from here"), "package install");
+  assert.equal(riskyAction("curl https://example.com"), "network");
+  assert.equal(riskyAction("fetch('/api')"), "http client");
+  assert.equal(riskyAction("cat > output.txt"), "file write");
+  assert.equal(riskyAction("read .env"), "secret/auth");
+  assert.equal(riskyAction("chmod +x script.sh"), "chmod/chown");
+  assert.equal(riskyAction("killall Codex"), "process control");
+  assert.equal(riskyAction("osascript -e 'tell app'"), "mac system control");
+  assert.equal(riskyAction("sqlite3 db.sqlite 'DELETE FROM calls'"), "database mutation");
+  assert.equal(riskyAction("kubectl delete pod x"), "cloud/infra");
+  assert.equal(riskyAction("playwright click button"), "browser control");
+  assert.equal(riskyAction("rg token ~/.config"), "broad filesystem scan");
+  assert.equal(riskyAction("read git status"), null);
   assert.equal(riskyAction("plain assistant text"), null);
 });
 
@@ -273,9 +294,9 @@ test("extracts provider request model for risky per-model UI", () => {
 });
 
 test("scans provider response streams for risky text", () => {
-  assert.equal(scanProviderResponseChunk("anthropic", 'event: content_block_delta\ndata: {"delta":{"text":"git status"}}'), true);
+  assert.equal(scanProviderResponseChunk("anthropic", 'event: content_block_delta\ndata: {"delta":{"text":"git push origin main"}}'), true);
   assert.equal(scanProviderResponseAction("anthropic", 'event: content_block_delta\ndata: {"delta":{"text":"rm -rf /tmp/x"}}'), "rm -rf");
-  assert.equal(scanProviderResponseAction("openai", 'data: {"type":"response.output_text.delta","delta":"npm install x"}'), "npm install");
+  assert.equal(scanProviderResponseAction("openai", 'data: {"type":"response.output_text.delta","delta":"npm install x"}'), "package install");
   assert.equal(scanProviderResponseChunk("openai", 'data: {"type":"response.output_text.delta","delta":"apply_patch"}'), true);
   assert.equal(scanProviderResponseChunk("anthropic", 'event: ping\ndata: {"type":"ping"}'), false);
   assert.equal(scanProviderResponseAction("anthropic", 'event: ping\ndata: {"type":"ping"}'), null);
