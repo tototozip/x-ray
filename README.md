@@ -8,7 +8,7 @@ xray
 ```
 
 Run `xray`. A floating macOS window opens and counts Codex and Claude Code model
-calls until you stop it:
+calls, plus risky returned Claude Code messages, until you stop it:
 
 ```txt
 codex llm calls: 6
@@ -35,12 +35,17 @@ LLM service:
   instead of falling back to delayed local logs.
 - Claude Code sessions started after `xray` launches pick up the same local
   receiver through temporary `~/.claude/settings.json` telemetry env settings.
+- Claude Code sessions started after `xray` launches also use a temporary local
+  per-process HTTPS proxy and temporary CA file. `xray` scans streamed responses
+  in memory and increments the risky count once per response when it sees
+  `git`, `rm`, `apply_patch`, `chmod`, `kill`, `pkill`, `osascript`, `npm install`,
+  `curl`, or `sqlite3`.
 - It does not modify Codex config, app-server state, certificates, or macOS proxy
   settings permanently. On exit, it restores the original Codex and Claude Code
-  config files.
+  config files and removes the temporary proxy certificate files.
 
 This is intentionally limited to Codex and Claude Code. It avoids macOS system
-proxy settings, local certificate trust, per-terminal wrapping, and log-database
+proxy settings, system certificate trust, per-terminal wrapping, and log-database
 polling.
 
 A single visible user message can still produce more than one count when Codex

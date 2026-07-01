@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { startRiskProxy } from "./xray-proxy.js";
 
 const home = os.homedir();
 const stateDir = path.join(process.env.XDG_STATE_HOME || path.join(home, ".local", "state"), "xray");
@@ -27,6 +28,11 @@ const claudeTelemetryEnvKeys = [
   "OTEL_EXPORTER_OTLP_LOGS_PROTOCOL",
   "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
   "OTEL_LOGS_EXPORT_INTERVAL",
+  "HTTPS_PROXY",
+  "HTTP_PROXY",
+  "ALL_PROXY",
+  "NO_PROXY",
+  "NODE_EXTRA_CA_CERTS",
   claudeEndMarker,
 ];
 
@@ -55,8 +61,16 @@ function main() {
   let calls = 0;
   const models = {};
   const providers = {};
+  const riskyModels = {};
+  let risky = 0;
   let stopped = false;
-  writeState(statePath, calls, "counting", models, providers);
+  writeState(statePath, { calls, risky, status: "counting", models, providers, riskyModels });
+
+  const addRisky = ({ provider = "unknown", model = "unknown" } = {}) => {
+    risky += 1;
+    if (model !== "unknown") riskyModels[model] = (riskyModels[model] || 0) + 1;
+    writeState(statePath, { calls, risky, status: "counting", models, providers, riskyModels });
+  };
 
   const addRequests = (requests) => {
     if (!requests.length) return;
@@ -65,17 +79,22 @@ function main() {
       models[request.model] = (models[request.model] || 0) + 1;
       providers[request.model] = request.provider;
     }
-    writeState(statePath, calls, "counting", models, providers);
+    writeState(statePath, { calls, risky, status: "counting", models, providers, riskyModels });
   };
 
   const collector = startOtelCollector({ onRequests: addRequests });
-  collector.listen(0, "127.0.0.1", () => {
+  collector.listen(0, "127.0.0.1", async () => {
     let restoreConfig;
     let window;
+    let riskProxy;
     try {
       const port = collector.address().port;
+      riskProxy = startRiskProxy({ onRisky: addRisky, workDir: path.join(stateDir, `proxy-${process.pid}`) });
+      await riskProxy.listen();
+      const proxyPort = riskProxy.address().port;
+      const proxyEnv = riskProxyEnv(proxyPort, riskProxy.caCert);
       const restoreCodexConfig = installCodexTelemetryConfig(port, { codexHome });
-      const restoreClaudeConfig = installClaudeTelemetryConfig(port, { claudeHome });
+      const restoreClaudeConfig = installClaudeTelemetryConfig(port, { claudeHome, proxyEnv });
       restoreConfig = () => {
         restoreCodexConfig();
         restoreClaudeConfig();
@@ -92,8 +111,10 @@ function main() {
       if (stopped) return;
       stopped = true;
       try { restoreConfig?.(); } catch (e) { console.error(`xray restore warning: ${e.message}`); }
+      try { riskProxy?.close(); } catch {}
+      try { riskProxy?.cleanup(); } catch {}
       try { collector.close(); } catch {}
-      writeState(statePath, calls, "stopped", models, providers);
+      writeState(statePath, { calls, risky, status: "stopped", models, providers, riskyModels });
       kill(window);
       process.exit(code);
     };
@@ -274,12 +295,12 @@ export function installCodexTelemetryConfig(port, { codexHome = process.env.CODE
   return () => atomicWrite(configPath, original, mode);
 }
 
-export function installClaudeTelemetryConfig(port, { claudeHome = process.env.CLAUDE_CONFIG_DIR || path.join(home, ".claude") } = {}) {
+export function installClaudeTelemetryConfig(port, { claudeHome = process.env.CLAUDE_CONFIG_DIR || path.join(home, ".claude"), proxyEnv = null } = {}) {
   const settingsPath = path.join(claudeHome, "settings.json");
   fs.mkdirSync(claudeHome, { recursive: true });
   const original = readFileIfExists(settingsPath);
   const mode = fileMode(settingsPath);
-  atomicWrite(settingsPath, withXrayClaudeSettings(original, port), mode);
+  atomicWrite(settingsPath, withXrayClaudeSettings(original, port, proxyEnv), mode);
   return () => atomicWrite(settingsPath, original, mode);
 }
 
@@ -292,7 +313,7 @@ ${endMarker}
 `;
 }
 
-export function withXrayClaudeSettings(settings, port) {
+export function withXrayClaudeSettings(settings, port, proxyEnv = null) {
   let parsed = {};
   try {
     parsed = settings.trim() ? JSON.parse(settings) : {};
@@ -313,9 +334,21 @@ export function withXrayClaudeSettings(settings, port) {
     OTEL_EXPORTER_OTLP_LOGS_PROTOCOL: "http/json",
     OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: `http://127.0.0.1:${port}/v1/logs`,
     OTEL_LOGS_EXPORT_INTERVAL: "500",
+    ...(proxyEnv || {}),
     [claudeEndMarker]: "managed by xray; removed on exit",
   };
   return `${JSON.stringify(parsed, null, 2)}\n`;
+}
+
+function riskProxyEnv(port, caCert) {
+  const proxy = `http://127.0.0.1:${port}`;
+  return {
+    HTTPS_PROXY: proxy,
+    HTTP_PROXY: proxy,
+    ALL_PROXY: proxy,
+    NO_PROXY: "127.0.0.1,localhost",
+    NODE_EXTRA_CA_CERTS: caCert,
+  };
 }
 
 function stripManagedBlock(config) {
@@ -401,9 +434,9 @@ function openWindow(statePath) {
   return spawn("osascript", ["-l", "JavaScript", script, statePath], { stdio: "ignore" });
 }
 
-function writeState(file, calls, status, models = {}, providers = {}) {
+function writeState(file, { calls, risky = 0, status, models = {}, providers = {}, riskyModels = {} }) {
   const tmp = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify({ label: "xray", calls, models, providers, status, updated: Date.now() }));
+  fs.writeFileSync(tmp, JSON.stringify({ label: "xray", calls, risky, models, providers, riskyModels, status, updated: Date.now() }));
   fs.renameSync(tmp, file);
 }
 

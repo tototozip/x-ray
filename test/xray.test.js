@@ -12,6 +12,10 @@ const {
   withXrayClaudeSettings,
   withXrayOtelConfig,
 } = await import("../bin/xray.js");
+const {
+  scanProviderResponseChunk,
+  textIsRisky,
+} = await import("../bin/xray-proxy.js");
 
 test("counts Codex request OTLP log events", () => {
   const payload = {
@@ -214,6 +218,32 @@ test("adds Claude Code telemetry env settings without dropping existing settings
   assert.equal(next.env.OTEL_LOGS_EXPORTER, "otlp");
   assert.equal(next.env.OTEL_EXPORTER_OTLP_ENDPOINT, "http://127.0.0.1:4321");
   assert.equal(next.env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT, "http://127.0.0.1:4321/v1/logs");
+});
+
+test("adds Claude Code proxy env settings when provided", () => {
+  const next = JSON.parse(withXrayClaudeSettings("{}", 4321, {
+    HTTPS_PROXY: "http://127.0.0.1:9999",
+    HTTP_PROXY: "http://127.0.0.1:9999",
+    ALL_PROXY: "http://127.0.0.1:9999",
+    NO_PROXY: "127.0.0.1,localhost",
+    NODE_EXTRA_CA_CERTS: "/tmp/xray-ca.pem",
+  }));
+  assert.equal(next.env.HTTPS_PROXY, "http://127.0.0.1:9999");
+  assert.equal(next.env.NO_PROXY, "127.0.0.1,localhost");
+  assert.equal(next.env.NODE_EXTRA_CA_CERTS, "/tmp/xray-ca.pem");
+});
+
+test("detects risky response markers", () => {
+  assert.equal(textIsRisky("run git status"), true);
+  assert.equal(textIsRisky("use rm -rf on a temp dir"), true);
+  assert.equal(textIsRisky("call apply_patch"), true);
+  assert.equal(textIsRisky("plain assistant text"), false);
+});
+
+test("scans provider response streams for risky text", () => {
+  assert.equal(scanProviderResponseChunk("anthropic", 'event: content_block_delta\ndata: {"delta":{"text":"git status"}}'), true);
+  assert.equal(scanProviderResponseChunk("openai", 'data: {"type":"response.output_text.delta","delta":"apply_patch"}'), true);
+  assert.equal(scanProviderResponseChunk("anthropic", 'event: ping\ndata: {"type":"ping"}'), false);
 });
 
 test("does not relaunch Codex app when disabled or off macOS", () => {

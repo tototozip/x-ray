@@ -218,9 +218,11 @@ function place(f, text, y, h) {
 const K = 30 // the core approaches full as calls grow (about half-full around K calls)
 
 let shownCalls = null
+let shownRisky = null
 let shownPrefix = null
 let shownModelsKey = null
 let shownDetailCalls = null
+let shownDetailRisky = null
 let lastToggleAt = 0
 let displayFrac = 0
 let flash = 0 // 1 on a new call, decays each frame
@@ -250,13 +252,15 @@ function modelEntries(state) {
 
 function updateDetails(state, calls) {
   const entries = modelEntries(state)
+  const risky = state && typeof state.risky === "number" ? state.risky : 0
   const key = JSON.stringify(entries)
-  if (key === shownModelsKey && calls === shownDetailCalls) return
+  if (key === shownModelsKey && calls === shownDetailCalls && risky === shownDetailRisky) return
   shownModelsKey = key
   shownDetailCalls = calls
+  shownDetailRisky = risky
 
   detailTitle.setStringValue("LLM calls by model")
-  detailSub.setStringValue(entries.length ? `${calls} total across ${entries.length} model${entries.length === 1 ? "" : "s"}` : "No model calls yet")
+  detailSub.setStringValue(entries.length ? `${calls} total · ${risky} risky across ${entries.length} model${entries.length === 1 ? "" : "s"}` : `${risky} risky · no model calls yet`)
 
   const max = entries.length ? entries[0][1] : 1
   for (let i = 0; i < rowCount; i++) {
@@ -281,12 +285,14 @@ function tick() {
   if (!win.isVisible) return app.terminate(null)
   const state = readState()
   const calls = state && typeof state.calls === "number" ? state.calls : 0
+  const risky = state && typeof state.risky === "number" ? state.risky : 0
   const prefix = state && state.label ? String(state.label).toUpperCase() + " · " : ""
-  if (calls !== shownCalls || prefix !== shownPrefix) {
+  if (calls !== shownCalls || risky !== shownRisky || prefix !== shownPrefix) {
     if (shownCalls !== null && calls > shownCalls) flash = 1
     place(number, String(calls), 76, 40)
-    place(caption, prefix + "LLM CALLS", 16, 15)
+    place(caption, `${prefix}LLM CALLS · ${risky} RISKY`, 16, 15)
     shownCalls = calls
+    shownRisky = risky
     shownPrefix = prefix
   }
   updateDetails(state, calls)
