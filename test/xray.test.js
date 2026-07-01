@@ -8,6 +8,7 @@ process.env.XDG_STATE_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "xray-state-"
 const {
   countOtelCalls,
   relaunchRunningCodexApp,
+  withXrayClaudeSettings,
   withXrayOtelConfig,
 } = await import("../bin/xray.js");
 
@@ -63,6 +64,51 @@ test("dedupes API and websocket telemetry for the same LLM request", () => {
         "event.timestamp": "2026-06-30T16:23:58.300Z",
         model: "gpt-5.5",
       }),
+    ] }] }],
+  };
+  assert.equal(countOtelCalls(payload), 1);
+});
+
+test("counts Claude Code API request telemetry as one LLM call", () => {
+  const payload = {
+    resourceLogs: [{ scopeLogs: [{ logRecords: [
+      {
+        body: { stringValue: "claude_code.api_request" },
+        attributes: [
+          attr("event.name", "api_request"),
+          attr("request_id", "req_one"),
+          attr("session.id", "session_one"),
+          attr("model", "claude-sonnet-4-6"),
+          attr("input_tokens", "3"),
+          attr("output_tokens", "15"),
+        ],
+      },
+    ] }] }],
+  };
+  assert.equal(countOtelCalls(payload), 1);
+});
+
+test("dedupes repeated Claude Code request telemetry by request id", () => {
+  const payload = {
+    resourceLogs: [{ scopeLogs: [{ logRecords: [
+      {
+        body: { stringValue: "claude_code.api_request" },
+        attributes: [
+          attr("event.name", "api_request"),
+          attr("request_id", "req_same"),
+          attr("model", "claude-sonnet-4-6"),
+          attr("event.timestamp", "2026-07-01T10:00:00.100Z"),
+        ],
+      },
+      {
+        body: { stringValue: "claude_code.api_request" },
+        attributes: [
+          attr("event.name", "api_request"),
+          attr("request_id", "req_same"),
+          attr("model", "claude-sonnet-4-6"),
+          attr("event.timestamp", "2026-07-01T10:00:00.200Z"),
+        ],
+      },
     ] }] }],
   };
   assert.equal(countOtelCalls(payload), 1);
@@ -132,6 +178,23 @@ trust_level = "trusted"
   assert.match(next, /\[projects\."\/tmp"\]/);
 });
 
+test("adds Claude Code telemetry env settings without dropping existing settings", () => {
+  const settings = JSON.stringify({
+    model: "sonnet",
+    env: {
+      EXISTING: "keep",
+      CLAUDE_CODE_ENABLE_TELEMETRY: "0",
+    },
+  });
+  const next = JSON.parse(withXrayClaudeSettings(settings, 4321));
+  assert.equal(next.model, "sonnet");
+  assert.equal(next.env.EXISTING, "keep");
+  assert.equal(next.env.CLAUDE_CODE_ENABLE_TELEMETRY, "1");
+  assert.equal(next.env.OTEL_LOGS_EXPORTER, "otlp");
+  assert.equal(next.env.OTEL_EXPORTER_OTLP_ENDPOINT, "http://127.0.0.1:4321");
+  assert.equal(next.env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT, "http://127.0.0.1:4321/v1/logs");
+});
+
 test("does not relaunch Codex app when disabled or off macOS", () => {
   assert.equal(relaunchRunningCodexApp({ shouldRelaunch: false, platform: "darwin" }), false);
   assert.equal(relaunchRunningCodexApp({ shouldRelaunch: true, platform: "linux" }), false);
@@ -158,8 +221,12 @@ test("relaunches an already-running Codex app", () => {
 function otelRecord(name, attrs = {}) {
   return {
     attributes: [
-      { key: "event.name", value: { stringValue: name } },
-      ...Object.entries(attrs).map(([key, value]) => ({ key, value: { stringValue: value } })),
+      attr("event.name", name),
+      ...Object.entries(attrs).map(([key, value]) => attr(key, value)),
     ],
   };
+}
+
+function attr(key, value) {
+  return { key, value: { stringValue: value } };
 }

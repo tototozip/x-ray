@@ -1,6 +1,6 @@
 # x-ray
 
-Minimal live Codex LLM-call counter.
+Minimal live Codex and Claude Code LLM-call counter.
 
 ```sh
 npm install -g github:tototozip/x-ray
@@ -24,17 +24,21 @@ Codex config before exiting.
 LLM service:
 
 - It temporarily points Codex's OpenTelemetry exporter at a local receiver and
-  counts each outbound Codex LLM request as it arrives.
+  counts each outbound Codex or Claude Code LLM request as it arrives.
 - It deduplicates repeated telemetry records for the same request, so one model
   request increments the counter once.
 - If the Codex desktop app is already open, `xray` relaunches it once after
   installing that temporary endpoint. This makes the app pick up live counting
   instead of falling back to delayed local logs.
+- Claude Code sessions started after `xray` launches pick up the same local
+  receiver through temporary `~/.claude/settings.json` telemetry env settings.
 - It does not modify Codex config, app-server state, certificates, or macOS proxy
-  settings permanently. On exit, it restores the original Codex config.
+  settings permanently. On exit, it restores the original Codex and Claude Code
+  config files.
 
-This is intentionally Codex-only. It avoids macOS system proxy settings, local
-certificate trust, per-terminal wrapping, and log-database polling.
+This is intentionally limited to Codex and Claude Code. It avoids macOS system
+proxy settings, local certificate trust, per-terminal wrapping, and log-database
+polling.
 
 A single visible user message can still produce more than one count when Codex
 does background LLM work, such as generating the thread title. Those are counted
@@ -46,5 +50,5 @@ part of the already-counted model request.
 
 ## Requirements
 
-macOS, Node >= 20, and Codex installed. The floating window and app relaunch use
-the built-in `osascript`.
+macOS, Node >= 20, and Codex or Claude Code installed. The floating window and
+Codex app relaunch use the built-in `osascript`.

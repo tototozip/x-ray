@@ -11,9 +11,24 @@ const stateDir = path.join(process.env.XDG_STATE_HOME || path.join(home, ".local
 const self = fileURLToPath(import.meta.url);
 const beginMarker = "# >>> xray codex telemetry >>>";
 const endMarker = "# <<< xray codex telemetry <<<";
+const claudeBeginMarker = "__xray_claude_telemetry_begin__";
+const claudeEndMarker = "__xray_claude_telemetry_end__";
 const websocketRequestEvents = new Set(["codex.websocket_request", "codex.websocket.request"]);
 const codexBundleId = "com.openai.codex";
 const requestDedupeWindowMs = 1000;
+const claudeTelemetryEnvKeys = [
+  claudeBeginMarker,
+  "CLAUDE_CODE_ENABLE_TELEMETRY",
+  "OTEL_LOGS_EXPORTER",
+  "OTEL_METRICS_EXPORTER",
+  "OTEL_TRACES_EXPORTER",
+  "OTEL_EXPORTER_OTLP_PROTOCOL",
+  "OTEL_EXPORTER_OTLP_ENDPOINT",
+  "OTEL_EXPORTER_OTLP_LOGS_PROTOCOL",
+  "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
+  "OTEL_LOGS_EXPORT_INTERVAL",
+  claudeEndMarker,
+];
 
 if (isMain()) main();
 
@@ -35,6 +50,7 @@ function main() {
   fs.mkdirSync(stateDir, { recursive: true });
   const statePath = path.join(stateDir, "codex.json");
   const codexHome = process.env.CODEX_HOME || path.join(home, ".codex");
+  const claudeHome = process.env.CLAUDE_CONFIG_DIR || path.join(home, ".claude");
 
   let calls = 0;
   let stopped = false;
@@ -51,10 +67,16 @@ function main() {
     let restoreConfig;
     let window;
     try {
-      restoreConfig = installCodexTelemetryConfig(collector.address().port, { codexHome });
+      const port = collector.address().port;
+      const restoreCodexConfig = installCodexTelemetryConfig(port, { codexHome });
+      const restoreClaudeConfig = installClaudeTelemetryConfig(port, { claudeHome });
+      restoreConfig = () => {
+        restoreCodexConfig();
+        restoreClaudeConfig();
+      };
       relaunchRunningCodexApp();
       window = openWindow(statePath);
-      console.log("xray: counting Codex LLM calls live. Press Ctrl-C or close the window to stop.");
+      console.log("xray: counting Codex and Claude Code LLM calls live. Press Ctrl-C or close the window to stop.");
     } catch (e) {
       collector.close();
       return exit(`xray failed to start: ${e.message}`);
@@ -115,7 +137,8 @@ export function countOtelCalls(payload, { seenRequests = new Map() } = {}) {
       for (const record of scope.logRecords || []) {
         const attrs = attributesToObject(record.attributes);
         const name = attrs["event.name"];
-        if (!isLlmRequestEvent(name, attrs)) continue;
+        const body = otelValue(record.body);
+        if (!isLlmRequestEvent(name, attrs, body)) continue;
         if (seenRecently(record, attrs, seenRequests)) continue;
         calls += 1;
       }
@@ -124,8 +147,10 @@ export function countOtelCalls(payload, { seenRequests = new Map() } = {}) {
   return calls;
 }
 
-function isLlmRequestEvent(name, attrs) {
+function isLlmRequestEvent(name, attrs, body) {
   if (websocketRequestEvents.has(name)) return true;
+  if (body === "claude_code.api_request") return true;
+  if (name === "api_request" && attrs.request_id && attrs.model) return true;
   if (name === "codex.api_request") return isInferenceApiRequest(attrs);
   return false;
 }
@@ -149,6 +174,8 @@ function seenRecently(record, attrs, seenRequests) {
 }
 
 function requestKey(attrs) {
+  if (attrs.request_id) return ["claude.llm_request", attrs.request_id].join("|");
+
   const conversation = attrs["conversation.id"];
   if (!conversation) return null;
   return [
@@ -228,6 +255,15 @@ export function installCodexTelemetryConfig(port, { codexHome = process.env.CODE
   return () => atomicWrite(configPath, original, mode);
 }
 
+export function installClaudeTelemetryConfig(port, { claudeHome = process.env.CLAUDE_CONFIG_DIR || path.join(home, ".claude") } = {}) {
+  const settingsPath = path.join(claudeHome, "settings.json");
+  fs.mkdirSync(claudeHome, { recursive: true });
+  const original = readFileIfExists(settingsPath);
+  const mode = fileMode(settingsPath);
+  atomicWrite(settingsPath, withXrayClaudeSettings(original, port), mode);
+  return () => atomicWrite(settingsPath, original, mode);
+}
+
 export function withXrayOtelConfig(config, port) {
   const clean = removeTopLevelTables(stripManagedBlock(config), "otel").trimEnd();
   return `${clean}${clean ? "\n\n" : ""}${beginMarker}
@@ -235,6 +271,32 @@ export function withXrayOtelConfig(config, port) {
 exporter = { otlp-http = { endpoint = "http://127.0.0.1:${port}/v1/logs", protocol = "json" } }
 ${endMarker}
 `;
+}
+
+export function withXrayClaudeSettings(settings, port) {
+  let parsed = {};
+  try {
+    parsed = settings.trim() ? JSON.parse(settings) : {};
+  } catch {
+    parsed = {};
+  }
+  const env = { ...(parsed.env && typeof parsed.env === "object" ? parsed.env : {}) };
+  for (const key of claudeTelemetryEnvKeys) delete env[key];
+  parsed.env = {
+    ...env,
+    [claudeBeginMarker]: "managed by xray; removed on exit",
+    CLAUDE_CODE_ENABLE_TELEMETRY: "1",
+    OTEL_LOGS_EXPORTER: "otlp",
+    OTEL_METRICS_EXPORTER: "none",
+    OTEL_TRACES_EXPORTER: "none",
+    OTEL_EXPORTER_OTLP_PROTOCOL: "http/json",
+    OTEL_EXPORTER_OTLP_ENDPOINT: `http://127.0.0.1:${port}`,
+    OTEL_EXPORTER_OTLP_LOGS_PROTOCOL: "http/json",
+    OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: `http://127.0.0.1:${port}/v1/logs`,
+    OTEL_LOGS_EXPORT_INTERVAL: "500",
+    [claudeEndMarker]: "managed by xray; removed on exit",
+  };
+  return `${JSON.stringify(parsed, null, 2)}\n`;
 }
 
 function stripManagedBlock(config) {
@@ -322,7 +384,7 @@ function openWindow(statePath) {
 
 function writeState(file, calls, status) {
   const tmp = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify({ label: "codex", calls, status, updated: Date.now() }));
+  fs.writeFileSync(tmp, JSON.stringify({ label: "xray", calls, status, updated: Date.now() }));
   fs.renameSync(tmp, file);
 }
 

@@ -1,7 +1,7 @@
 {
   "name": "@tototozip/x-ray",
-  "version": "0.5.2",
-  "description": "Minimal live Codex LLM call counter.",
+  "version": "0.6.0",
+  "description": "Minimal live Codex and Claude Code LLM call counter.",
   "type": "module",
   "bin": {
     "xray": "./bin/xray.js"
