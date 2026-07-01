@@ -203,6 +203,20 @@ trust_level = "trusted"
   assert.match(next, /\[projects\."\/tmp"\]/);
 });
 
+test("adds temporary Codex OpenAI base URL without duplicating existing config", () => {
+  const config = `model = "gpt-5.5"
+openai_base_url = "https://example.invalid/v1"
+
+[otel]
+exporter = "old"
+`;
+  const next = withXrayOtelConfig(config, 1234, "http://127.0.0.1:9876/v1");
+  assert.equal((next.match(/^openai_base_url/gm) || []).length, 1);
+  assert.match(next, /openai_base_url = "http:\/\/127\.0\.0\.1:9876\/v1"/);
+  assert.equal((next.match(/\[otel\]/g) || []).length, 1);
+  assert.doesNotMatch(next, /example\.invalid/);
+});
+
 test("adds Claude Code telemetry env settings without dropping existing settings", () => {
   const settings = JSON.stringify({
     model: "sonnet",
@@ -244,6 +258,7 @@ test("scans provider response streams for risky text", () => {
   assert.equal(scanProviderResponseChunk("anthropic", 'event: content_block_delta\ndata: {"delta":{"text":"git status"}}'), true);
   assert.equal(scanProviderResponseChunk("openai", 'data: {"type":"response.output_text.delta","delta":"apply_patch"}'), true);
   assert.equal(scanProviderResponseChunk("anthropic", 'event: ping\ndata: {"type":"ping"}'), false);
+  assert.equal(scanProviderResponseChunk("openai", 'data: {"type":"response.created","response":{"metadata":{"latest_git_commit_hash":"abc"}}}'), false);
 });
 
 test("does not relaunch Codex app when disabled or off macOS", () => {

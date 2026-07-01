@@ -93,7 +93,7 @@ function main() {
       await riskProxy.listen();
       const proxyPort = riskProxy.address().port;
       const proxyEnv = riskProxyEnv(proxyPort, riskProxy.caCert);
-      const restoreCodexConfig = installCodexTelemetryConfig(port, { codexHome });
+      const restoreCodexConfig = installCodexTelemetryConfig(port, { codexHome, openaiBaseUrl: riskProxy.openaiBaseUrl() });
       const restoreClaudeConfig = installClaudeTelemetryConfig(port, { claudeHome, proxyEnv });
       restoreConfig = () => {
         restoreCodexConfig();
@@ -286,12 +286,12 @@ function otelValue(value) {
 
 // ---- Temporary Codex config for future Codex processes ----
 
-export function installCodexTelemetryConfig(port, { codexHome = process.env.CODEX_HOME || path.join(home, ".codex") } = {}) {
+export function installCodexTelemetryConfig(port, { codexHome = process.env.CODEX_HOME || path.join(home, ".codex"), openaiBaseUrl = null } = {}) {
   const configPath = path.join(codexHome, "config.toml");
   fs.mkdirSync(codexHome, { recursive: true });
   const original = readFileIfExists(configPath);
   const mode = fileMode(configPath);
-  atomicWrite(configPath, withXrayOtelConfig(original, port), mode);
+  atomicWrite(configPath, withXrayOtelConfig(original, port, openaiBaseUrl), mode);
   return () => atomicWrite(configPath, original, mode);
 }
 
@@ -304,12 +304,15 @@ export function installClaudeTelemetryConfig(port, { claudeHome = process.env.CL
   return () => atomicWrite(settingsPath, original, mode);
 }
 
-export function withXrayOtelConfig(config, port) {
-  const clean = removeTopLevelTables(stripManagedBlock(config), "otel").trimEnd();
-  return `${clean}${clean ? "\n\n" : ""}${beginMarker}
+export function withXrayOtelConfig(config, port, openaiBaseUrl = null) {
+  const clean = removeTopLevelKeys(removeTopLevelTables(stripManagedBlock(config), "otel"), ["openai_base_url"]).trimEnd();
+  const proxyLine = openaiBaseUrl ? `openai_base_url = ${JSON.stringify(openaiBaseUrl)}\n` : "";
+  return `${beginMarker}
+${proxyLine}
 [otel]
 exporter = { otlp-http = { endpoint = "http://127.0.0.1:${port}/v1/logs", protocol = "json" } }
 ${endMarker}
+${clean ? `\n${clean}\n` : ""}
 `;
 }
 
@@ -362,6 +365,19 @@ function removeTopLevelTables(config, name) {
     const table = line.match(/^\s*\[([^\[\]]+)\]\s*(?:#.*)?$/)?.[1]?.split(".")[0]?.replace(/^"|"$/g, "");
     if (table) dropping = table === name;
     if (!dropping) kept.push(line);
+  }
+  return kept.join("\n");
+}
+
+function removeTopLevelKeys(config, names) {
+  const drop = new Set(names);
+  const kept = [];
+  let inTopLevel = true;
+  for (const line of config.split("\n")) {
+    if (/^\s*\[/.test(line)) inTopLevel = false;
+    const key = inTopLevel ? line.match(/^\s*([A-Za-z0-9_-]+)\s*=/)?.[1] : null;
+    if (key && drop.has(key)) continue;
+    kept.push(line);
   }
   return kept.join("\n");
 }

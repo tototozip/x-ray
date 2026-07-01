@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import http from "node:http";
 import https from "node:https";
 import net from "node:net";
 import os from "node:os";
@@ -15,10 +16,43 @@ export function textIsRisky(text) {
 
 export function scanProviderResponseChunk(provider, chunk) {
   const text = Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk || "");
-  if (!textIsRisky(text)) return false;
-  if (provider === "anthropic") return text.includes("content_block_delta") || text.includes("message_delta") || text.includes("message_start");
-  if (provider === "openai") return text.includes("response.") || text.includes("data:");
-  return true;
+  return sseEvents(text).some((event) => scanProviderResponseEvent(provider, event));
+}
+
+export function scanProviderResponseEvent(provider, event) {
+  const data = eventData(event);
+  if (!data || data === "[DONE]") return false;
+  let parsed;
+  try {
+    parsed = JSON.parse(data);
+  } catch {
+    return false;
+  }
+
+  if (provider === "anthropic") {
+    return [
+      parsed.delta?.text,
+      parsed.delta?.partial_json,
+      parsed.content_block?.text,
+      parsed.content_block?.input,
+    ].some(textIsRisky);
+  }
+
+  if (provider === "openai") {
+    return [
+      parsed.delta,
+      parsed.arguments,
+      parsed.item?.arguments,
+      parsed.item?.input,
+      ...(parsed.response?.output || []).flatMap((item) => [
+        item.arguments,
+        item.input,
+        ...(item.content || []).map((content) => content.text),
+      ]),
+    ].some(textIsRisky);
+  }
+
+  return false;
 }
 
 export function startRiskProxy({ onRisky, workDir = fs.mkdtempSync(path.join(os.tmpdir(), "xray-proxy-")) } = {}) {
@@ -35,27 +69,41 @@ export function startRiskProxy({ onRisky, workDir = fs.mkdtempSync(path.join(os.
 
   const proxyServer = net.createServer((client) => handleProxyConnection(client, httpsServer));
   proxyServer.on("error", () => {});
+  const openaiReverseServer = http.createServer((req, res) => forwardProviderRequest(req, res, { provider: "openai", onRisky }));
+  openaiReverseServer.on("upgrade", (req, socket) => {
+    debugProxy(`openai reverse upgrade ${req.url}`);
+    socket.end("HTTP/1.1 426 Upgrade Required\r\nContent-Length: 0\r\n\r\n");
+  });
+  openaiReverseServer.on("error", () => {});
 
   return {
     caCert: certs.caCert,
     proxyServer,
     httpsServer,
+    openaiReverseServer,
     workDir,
     listen(port = 0, host = "127.0.0.1") {
       return new Promise((resolve, reject) => {
         httpsServer.listen(0, host, () => {
-          proxyServer.listen(port, host, resolve);
+          proxyServer.listen(port, host, () => {
+            openaiReverseServer.listen(0, host, resolve);
+          });
         });
         httpsServer.once("error", reject);
         proxyServer.once("error", reject);
+        openaiReverseServer.once("error", reject);
       });
     },
     address() {
       return proxyServer.address();
     },
+    openaiBaseUrl() {
+      return `http://127.0.0.1:${openaiReverseServer.address().port}/v1`;
+    },
     close() {
       try { proxyServer.close(); } catch {}
       try { httpsServer.close(); } catch {}
+      try { openaiReverseServer.close(); } catch {}
     },
     cleanup() {
       try { fs.rmSync(workDir, { recursive: true, force: true }); } catch {}
@@ -128,6 +176,11 @@ function handleProxyConnection(client, httpsServer) {
 
 function forwardInterceptedRequest(req, res, { onRisky }) {
   const provider = req.headers.host?.includes("anthropic") ? "anthropic" : "openai";
+  return forwardProviderRequest(req, res, { provider, onRisky });
+}
+
+function forwardProviderRequest(req, res, { provider, onRisky }) {
+  debugProxy(`${provider} ${req.method} ${req.url}`);
   const requestChunks = [];
   req.on("data", (chunk) => requestChunks.push(chunk));
   req.on("end", () => {
@@ -148,12 +201,18 @@ function forwardInterceptedRequest(req, res, { onRisky }) {
       (upRes) => {
         res.writeHead(upRes.statusCode || 502, upRes.headers);
         let marked = false;
-        let scanWindow = "";
+        let scanBuffer = "";
         upRes.on("data", (chunk) => {
-          scanWindow = (scanWindow + chunk.toString("utf8")).slice(-4096);
-          if (!marked && scanProviderResponseChunk(provider, scanWindow)) {
-            marked = true;
-            onRisky?.({ provider });
+          scanBuffer += chunk.toString("utf8");
+          const parts = scanBuffer.split(/\r?\n\r?\n/);
+          scanBuffer = parts.pop() || "";
+          for (const part of parts) {
+            if (!marked && scanProviderResponseEvent(provider, part)) {
+              marked = true;
+              debugProxy(`${provider} risky response ${req.url}`);
+              onRisky?.({ provider });
+              break;
+            }
           }
           res.write(chunk);
         });
@@ -161,6 +220,7 @@ function forwardInterceptedRequest(req, res, { onRisky }) {
       },
     );
     upstream.on("error", (e) => {
+      debugProxy(`${provider} upstream error ${e.message || e}`);
       try {
         res.writeHead(502, { "content-type": "text/plain" });
         res.end(String(e.message || e));
@@ -168,4 +228,20 @@ function forwardInterceptedRequest(req, res, { onRisky }) {
     });
     upstream.end(requestBody);
   });
+}
+
+function debugProxy(message) {
+  if (process.env.XRAY_PROXY_DEBUG === "1") console.error(`xray proxy: ${message}`);
+}
+
+function sseEvents(text) {
+  return String(text || "").split(/\r?\n\r?\n/).filter(Boolean);
+}
+
+function eventData(event) {
+  return String(event || "")
+    .split(/\r?\n/)
+    .filter((line) => line.startsWith("data:"))
+    .map((line) => line.slice(5).trimStart())
+    .join("\n");
 }

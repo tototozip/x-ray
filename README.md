@@ -8,7 +8,7 @@ xray
 ```
 
 Run `xray`. A floating macOS window opens and counts Codex and Claude Code model
-calls, plus risky returned Claude Code messages, until you stop it:
+calls, plus risky returned model messages, until you stop it:
 
 ```txt
 codex llm calls: 6
@@ -33,6 +33,9 @@ LLM service:
 - If the Codex desktop app is already open, `xray` relaunches it once after
   installing that temporary endpoint. This makes the app pick up live counting
   instead of falling back to delayed local logs.
+- Codex sessions started after `xray` launches also use a temporary local
+  OpenAI reverse proxy through Codex's temporary `openai_base_url` config. This
+  lets `xray` scan streamed responses in memory for risky markers.
 - Claude Code sessions started after `xray` launches pick up the same local
   receiver through temporary `~/.claude/settings.json` telemetry env settings.
 - Claude Code sessions started after `xray` launches also use a temporary local
