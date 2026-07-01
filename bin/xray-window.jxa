@@ -176,14 +176,9 @@ ObjC.registerSubclass({
 })
 
 const clickTarget = $.XrayClickTarget.alloc.init
-const clickButton = $.NSButton.alloc.initWithFrame($.NSMakeRect((width - 82) / 2, 135, 82, 24))
-clickButton.setTitle("DETAILS")
-clickButton.setBezelStyle($.NSBezelStyleRounded)
-clickButton.setButtonType($.NSButtonTypeMomentaryPushIn)
-clickButton.setFont($.NSFont.systemFontOfSizeWeight(10, $.NSFontWeightBold))
-clickButton.setTarget(clickTarget)
-clickButton.setAction("toggleDetails:")
-win.contentView.addSubview(clickButton)
+const clickGesture = $.NSClickGestureRecognizer.alloc.initWithTargetAction(clickTarget, "toggleDetails:")
+clickGesture.setNumberOfClicksRequired(1)
+win.contentView.addGestureRecognizer(clickGesture)
 
 // Center by measuring the text and sizing the field to it.
 function place(f, text, y, h) {
