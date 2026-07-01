@@ -39,15 +39,22 @@ win.setTitleVisibility($.NSWindowTitleHidden)
 win.setTitlebarAppearsTransparent(true)
 win.setAppearance($.NSAppearance.appearanceNamed($.NSAppearanceNameDarkAqua))
 win.setOpaque(false)
-win.setBackgroundColor($.NSColor.colorWithCalibratedWhiteAlpha(0.13, 1.0))
 
 const G = [0.36, 0.86, 0.52] // Codex green
 const CLAUDE = [0.95, 0.55, 0.28]
 const UNKNOWN = [0.72, 0.72, 0.72]
 const RED = [1.0, 0.22, 0.24]
+const POPUP_BG = [0.13, 0.13, 0.13]
+const POPUP_RISK_BG = [0.62, 0.03, 0.04]
+const RING_BG = [0.19, 0.19, 0.19]
+const RING_RISK_BG = [0.42, 0.02, 0.03]
+const DIM = [0.55, 0.55, 0.55]
 const rgb = (c, a) => $.NSColor.colorWithCalibratedRedGreenBlueAlpha(c[0], c[1], c[2], a)
 const lerp = (a, b, t) => a + (b - a) * t
-const dim = $.NSColor.colorWithCalibratedWhiteAlpha(0.55, 1.0)
+const mixColor = (a, b, t) => [lerp(a[0], b[0], t), lerp(a[1], b[1], t), lerp(a[2], b[2], t)]
+const dim = rgb(DIM, 1.0)
+
+win.setBackgroundColor(rgb(POPUP_BG, 1.0))
 
 function providerColor(provider) {
   if (provider === "claude") return CLAUDE
@@ -72,7 +79,7 @@ const cy = 42 + D / 2
 
 const ring = box($.NSMakeRect(cx - D / 2, cy - D / 2, D, D))
 ring.setCornerRadius(D / 2)
-ring.setFillColor(rgb([0.19, 0.19, 0.19], 1))
+ring.setFillColor(rgb(RING_BG, 1))
 ring.setBorderColor(rgb(G, 0.5))
 ring.setBorderWidth(1.5)
 win.contentView.addSubview(ring)
@@ -325,11 +332,16 @@ function tick() {
   disc.setFrame($.NSMakeRect(cx - s / 2, cy - s / 2, s, s))
   disc.setCornerRadius(s / 2)
   const callFill = [lerp(G[0], 0.7, flash), lerp(G[1], 1, flash), lerp(G[2], 0.8, flash)]
-  const fill = [lerp(callFill[0], RED[0], riskyFlash), lerp(callFill[1], RED[1], riskyFlash), lerp(callFill[2], RED[2], riskyFlash)]
+  const fill = mixColor(callFill, RED, riskyFlash)
+  const popupBg = mixColor(POPUP_BG, POPUP_RISK_BG, riskyFlash)
+  const ringBg = mixColor(RING_BG, RING_RISK_BG, riskyFlash)
   const textColor = [lerp(1, fill[0], pulse), lerp(1, fill[1], pulse), lerp(1, fill[2], pulse)]
+  win.setBackgroundColor(rgb(popupBg, 1.0))
+  ring.setFillColor(rgb(ringBg, 1))
   disc.setFillColor(rgb(fill, 1))
   ring.setBorderColor(rgb(fill, lerp(0.45, 1, pulse)))
   number.setTextColor(rgb(textColor, 1))
+  caption.setTextColor(rgb(mixColor(DIM, [1, 0.88, 0.88], riskyFlash), 1))
 
   flash *= 0.88
   riskyFlash *= 0.84
