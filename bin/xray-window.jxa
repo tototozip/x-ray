@@ -44,6 +44,7 @@ const G = [0.36, 0.86, 0.52] // Codex green
 const CLAUDE = [0.95, 0.55, 0.28]
 const UNKNOWN = [0.72, 0.72, 0.72]
 const RED = [1.0, 0.22, 0.24]
+const GOLD = [1.0, 0.82, 0.3] // milestone celebration accent
 const POPUP_BG = [0.13, 0.13, 0.13]
 const POPUP_RISK_BG = [0.62, 0.03, 0.04]
 const RING_BG = [0.19, 0.19, 0.19]
@@ -87,6 +88,14 @@ win.contentView.addSubview(ring)
 const disc = box($.NSMakeRect(cx, cy, 0, 0))
 disc.setFillColor(rgb(G, 1))
 win.contentView.addSubview(disc)
+
+// A thin outline that expands past the ring and fades out on every call.
+const rippleRing = box($.NSMakeRect(cx - D / 2, cy - D / 2, D, D))
+rippleRing.setFillColor($.NSColor.clearColor)
+rippleRing.setBorderWidth(2)
+rippleRing.setBorderColor(rgb(G, 0))
+rippleRing.setCornerRadius(D / 2)
+win.contentView.addSubview(rippleRing)
 
 function label(y, font, color) {
   const f = $.NSTextField.alloc.initWithFrame($.NSMakeRect(0, y, width, 20))
@@ -275,12 +284,34 @@ let lastToggleAt = 0
 let lastRiskToggleAt = 0
 let detailMode = "models"
 let displayFrac = 0
+let displayCalls = 0 // the number rolls toward the true count like an odometer
+let renderedInt = -1
+let renderedCaption = null
 let flash = 0 // 1 on a new call, decays each frame
 let riskyFlash = 0 // risky responses briefly override the green pulse with red
+let milestoneFlash = 0 // 1 when a milestone is crossed, tints everything gold
+let milestoneValue = 0
+let ripplePulse = 0 // 1 on a new call, drives the expanding outline
+let rippleColor = G
+let breathT = 0 // frame counter for the idle breathing sine
 
 function truncate(s, n) {
   s = String(s)
   return s.length <= n ? s : s.slice(0, Math.max(0, n - 3)) + "..."
+}
+
+// Highest milestone crossed between two call counts (0 if none). Fixed stops
+// early on, then every 1000 so the celebration keeps recurring on long runs.
+function milestoneCrossed(prev, cur) {
+  const stops = [10, 25, 50, 100, 250, 500, 1000]
+  let hit = 0
+  for (let i = 0; i < stops.length; i++) {
+    if (prev < stops[i] && cur >= stops[i]) hit = stops[i]
+  }
+  if (cur >= 1000 && Math.floor(cur / 1000) > Math.floor(prev / 1000)) {
+    hit = Math.floor(cur / 1000) * 1000
+  }
+  return hit
 }
 
 function modelProvider(name, providers) {
@@ -400,38 +431,95 @@ function tick() {
   const risky = state && typeof state.risky === "number" ? state.risky : 0
   const prefix = state && state.label ? String(state.label).toUpperCase() + " · " : ""
   if (calls !== shownCalls || risky !== shownRisky || prefix !== shownPrefix) {
-    if (shownCalls !== null && calls > shownCalls) flash = 1
-    if (shownRisky !== null && risky > shownRisky) riskyFlash = 1
-    place(number, String(calls), 76, 40)
-    place(caption, `${prefix}LLM CALLS · ${risky} RISKY`, 16, 15)
+    const prevCalls = shownCalls
+    const gainedCall = prevCalls !== null && calls > prevCalls
+    const gainedRisky = shownRisky !== null && risky > shownRisky
+    const milestone = gainedCall ? milestoneCrossed(prevCalls, calls) : 0
+    if (gainedCall) {
+      flash = 1
+      ripplePulse = 1
+      rippleColor = G
+    }
+    if (milestone) {
+      milestoneFlash = 1
+      milestoneValue = milestone
+      rippleColor = GOLD
+    }
+    if (gainedRisky) {
+      riskyFlash = 1
+      ripplePulse = 1
+      if (!milestone) rippleColor = RED
+    }
     shownCalls = calls
     shownRisky = risky
     shownPrefix = prefix
   }
   updateDetails(state, calls)
 
+  // 1. Odometer: roll the shown number toward the true count.
+  displayCalls += (calls - displayCalls) * 0.16
+  if (Math.abs(calls - displayCalls) < 0.5) displayCalls = calls
+  const shownInt = Math.round(displayCalls)
+  if (shownInt !== renderedInt) {
+    place(number, String(shownInt), 76, 40)
+    renderedInt = shownInt
+  }
+
+  // 3. Milestone banner briefly replaces the caption, then reverts on decay.
+  const captionText =
+    milestoneFlash > 0.3 ? `MILESTONE · ${milestoneValue} CALLS` : `${prefix}LLM CALLS · ${risky} RISKY`
+  if (captionText !== renderedCaption) {
+    place(caption, captionText, 16, 15)
+    renderedCaption = captionText
+  }
+
+  const pulse = Math.max(flash, riskyFlash, milestoneFlash)
+
+  // 2. Idle breathing: a slow sine on the core (and ring glow) when nothing is
+  // happening, so the popup stays alive between calls. It fades out under pulses.
+  breathT += 1
+  const idle = Math.max(0, 1 - pulse * 4)
+  const breath = Math.sin(breathT * 0.07) * 0.014 * idle
+
   const target = calls / (calls + K)
   displayFrac += (target - displayFrac) * 0.18 // ease the core toward its size
-  const pulse = Math.max(flash, riskyFlash)
-  const s = Math.min(1, displayFrac + pulse * 0.06) * D // little surge on a new call
+  const s = Math.max(0, Math.min(1, displayFrac + pulse * 0.06 + breath)) * D // surge on a new call
   disc.setFrame($.NSMakeRect(cx - s / 2, cy - s / 2, s, s))
   disc.setCornerRadius(s / 2)
   const callFill = [lerp(G[0], 0.7, flash), lerp(G[1], 1, flash), lerp(G[2], 0.8, flash)]
-  const fill = mixColor(callFill, RED, riskyFlash)
+  const fill = mixColor(mixColor(callFill, RED, riskyFlash), GOLD, milestoneFlash)
   const popupBg = mixColor(POPUP_BG, POPUP_RISK_BG, riskyFlash)
   const ringBg = mixColor(RING_BG, RING_RISK_BG, riskyFlash)
-  const textColor = [lerp(1, fill[0], pulse), lerp(1, fill[1], pulse), lerp(1, fill[2], pulse)]
+  // Tint the number on call/risky pulses but not on the gold milestone, so it
+  // stays legible over the gold core during the burst.
+  const numPulse = Math.max(flash, riskyFlash)
+  const numTint = mixColor(callFill, RED, riskyFlash)
+  const textColor = [lerp(1, numTint[0], numPulse), lerp(1, numTint[1], numPulse), lerp(1, numTint[2], numPulse)]
   win.setBackgroundColor(rgb(popupBg, 1.0))
   ring.setFillColor(rgb(ringBg, 1))
   disc.setFillColor(rgb(fill, 1))
-  ring.setBorderColor(rgb(fill, lerp(0.45, 1, pulse)))
+  ring.setBorderColor(rgb(fill, Math.min(1, lerp(0.45, 1, pulse) + breath * 6)))
   number.setTextColor(rgb(textColor, 1))
-  caption.setTextColor(rgb(mixColor(DIM, [1, 0.88, 0.88], riskyFlash), 1))
+  caption.setTextColor(rgb(mixColor(mixColor(DIM, [1, 0.88, 0.88], riskyFlash), GOLD, milestoneFlash), 1))
+
+  // 4. Ring ripple: expand the outline past the ring and fade it as it decays.
+  if (ripplePulse > 0.02) {
+    const rs = lerp(s, D * 1.28, 1 - ripplePulse)
+    rippleRing.setFrame($.NSMakeRect(cx - rs / 2, cy - rs / 2, rs, rs))
+    rippleRing.setCornerRadius(rs / 2)
+    rippleRing.setBorderColor(rgb(rippleColor, ripplePulse * 0.55))
+  } else {
+    rippleRing.setBorderColor(rgb(rippleColor, 0))
+  }
 
   flash *= 0.88
   riskyFlash *= 0.84
+  milestoneFlash *= 0.94
+  ripplePulse *= 0.9
   if (flash < 0.02) flash = 0
   if (riskyFlash < 0.02) riskyFlash = 0
+  if (milestoneFlash < 0.02) milestoneFlash = 0
+  if (ripplePulse < 0.02) ripplePulse = 0
 }
 
 win.makeKeyAndOrderFront(null)
