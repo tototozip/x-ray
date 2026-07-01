@@ -176,10 +176,11 @@ ObjC.registerSubclass({
 })
 
 const clickTarget = $.XrayClickTarget.alloc.init
-const clickButton = $.NSButton.alloc.initWithFrame($.NSMakeRect(0, 0, width, height))
-clickButton.setTitle("")
-clickButton.setBordered(false)
-clickButton.setTransparent(true)
+const clickButton = $.NSButton.alloc.initWithFrame($.NSMakeRect((width - 82) / 2, 135, 82, 24))
+clickButton.setTitle("DETAILS")
+clickButton.setBezelStyle($.NSBezelStyleRounded)
+clickButton.setButtonType($.NSButtonTypeMomentaryPushIn)
+clickButton.setFont($.NSFont.systemFontOfSizeWeight(10, $.NSFontWeightBold))
 clickButton.setTarget(clickTarget)
 clickButton.setAction("toggleDetails:")
 win.contentView.addSubview(clickButton)
